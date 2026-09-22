@@ -1,0 +1,5 @@
+# HydroSentry-AI — runtime dependencies
+# Self-contained live physics + statistics simulation; runs fully offline.
+streamlit>=1.36
+plotly>=5.22
+numpy>=1.24

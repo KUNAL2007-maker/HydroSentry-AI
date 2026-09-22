@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Claude Code — machine-local settings (keep shared settings.json tracked)
+.claude/settings.local.json
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
