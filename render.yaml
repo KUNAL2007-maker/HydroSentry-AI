@@ -1,0 +1,23 @@
+# render.yaml — Render Blueprint for HydroSentry-AI (Streamlit)
+# --------------------------------------------------------------
+# One-click deploy:
+#   1. Push this file to GitHub (already done if you see it on the repo).
+#   2. In the Render dashboard: New +  ->  Blueprint.
+#   3. Connect the KUNAL2007-maker/HydroSentry-AI repository.
+#   4. Render reads this file and creates the web service automatically.
+#
+# The critical line is startCommand: Streamlit MUST bind to Render's $PORT
+# and to 0.0.0.0, or the deploy is marked unhealthy and never goes live.
+
+services:
+  - type: web
+    name: hydrosentry-ai
+    runtime: python
+    plan: free                      # free tier; sleeps after inactivity, wakes on request
+    region: oregon                  # change to singapore/frankfurt/ohio if you prefer
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+    autoDeployTrigger: commit       # redeploy automatically on every push to the tracked branch
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.4"

@@ -23,6 +23,24 @@ It opens in your browser at `http://localhost:8501`. No internet or account need
 
 ---
 
+## Deploy on Render (live public URL)
+
+This repo ships a [`render.yaml`](render.yaml) Blueprint, so Render can build and
+host the app with no manual configuration:
+
+1. Push this repo to GitHub (this branch/`main` already contains `render.yaml`).
+2. Go to **[dashboard.render.com](https://dashboard.render.com)** and sign in with GitHub.
+3. Click **New +  →  Blueprint**.
+4. Select the **`KUNAL2007-maker/HydroSentry-AI`** repository and click **Apply**.
+5. Render reads `render.yaml`, installs `requirements.txt`, and starts Streamlit
+   bound to its `$PORT`. First build takes a few minutes; then you get a public
+   `https://hydrosentry-ai.onrender.com`-style URL.
+
+Every later `git push` to the tracked branch auto-redeploys. The **free** plan
+sleeps after ~15 min of inactivity and wakes on the next request (first hit is slow).
+
+---
+
 ## Scenarios & playback
 
 The sidebar drives a live clock over a 32-step event window (an 8-hour flood
@@ -86,6 +104,7 @@ PCCOE HYDRO/
 ├── app.py                 # the dashboard (Streamlit, organised by tab)
 ├── hydro_engine.py        # the offline physics + statistics engine
 ├── requirements.txt       # streamlit + plotly + numpy
+├── render.yaml            # Render Blueprint (one-click cloud deploy)
 ├── README.md              # this file
 ├── .streamlit/
 │   └── config.toml        # light theme + brand colours
