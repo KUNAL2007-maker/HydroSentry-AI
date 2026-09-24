@@ -1,13 +1,12 @@
 # HydroSentry-AI — Basin Command Console
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/KUNAL2007-maker/HydroSentry-AI)
-&nbsp;
-![Built with Streamlit](https://img.shields.io/badge/Built%20with-Streamlit-FF4B4B?logo=streamlit&logoColor=white)
-![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
-![Runs offline](https://img.shields.io/badge/Engine-offline%20physics%20%2B%20stats-0E7C8B)
+**▶ Live demo — [hydrosentry-ai.onrender.com](https://hydrosentry-ai.onrender.com/)**
 
-<!-- Once your Render service is live, add its URL here, e.g.:
-     **Live demo:** https://hydrosentry-ai.onrender.com -->
+[![Live demo](https://img.shields.io/website?url=https%3A%2F%2Fhydrosentry-ai.onrender.com&up_message=online&down_message=asleep&label=live%20demo&logo=render&logoColor=white)](https://hydrosentry-ai.onrender.com/)
+[![Deploy to Render](https://img.shields.io/badge/Deploy-Render-46E3B7?logo=render&logoColor=white)](https://render.com/deploy?repo=https://github.com/KUNAL2007-maker/HydroSentry-AI)
+[![Built with Streamlit](https://img.shields.io/badge/Built%20with-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io)
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org)
+![Runs offline](https://img.shields.io/badge/Engine-offline%20physics%20%2B%20stats-0E7C8B)
 
 A formal, light-theme interface for **HydroSentry-AI**, a physics-guided flood &
 drought early-warning system for the **Upper Bhima Basin (Pune, Maharashtra)**.
@@ -53,7 +52,7 @@ sleeps after ~15 min of inactivity and wakes on the next request (first hit is s
 append `?embed=true` to hide the Streamlit menu and footer:
 
 ```html
-<iframe src="https://YOUR-APP.onrender.com/?embed=true"
+<iframe src="https://hydrosentry-ai.onrender.com/?embed=true"
         width="100%" height="900" style="border:0"></iframe>
 ```
 
