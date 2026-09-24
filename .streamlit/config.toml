@@ -8,6 +8,12 @@ font = "sans serif"
 
 [server]
 headless = true
+# Allow the console to run inside a cross-origin <iframe> (project page,
+# submission portal, judging site, etc.) while keeping XSRF protection ON.
+# SameSite=None requires HTTPS — Render serves the app over HTTPS automatically,
+# so embedding "just works" once deployed. Tip: append ?embed=true to the iframe
+# URL to hide Streamlit's top menu and footer.
+xsrfCookieSameSite = "none"
 
 [browser]
 gatherUsageStats = false

@@ -1,5 +1,14 @@
 # HydroSentry-AI — Basin Command Console
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/KUNAL2007-maker/HydroSentry-AI)
+&nbsp;
+![Built with Streamlit](https://img.shields.io/badge/Built%20with-Streamlit-FF4B4B?logo=streamlit&logoColor=white)
+![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![Runs offline](https://img.shields.io/badge/Engine-offline%20physics%20%2B%20stats-0E7C8B)
+
+<!-- Once your Render service is live, add its URL here, e.g.:
+     **Live demo:** https://hydrosentry-ai.onrender.com -->
+
 A formal, light-theme interface for **HydroSentry-AI**, a physics-guided flood &
 drought early-warning system for the **Upper Bhima Basin (Pune, Maharashtra)**.
 
@@ -38,6 +47,15 @@ host the app with no manual configuration:
 
 Every later `git push` to the tracked branch auto-redeploys. The **free** plan
 sleeps after ~15 min of inactivity and wakes on the next request (first hit is slow).
+
+**Embed it anywhere.** The deployed app is iframe-friendly (see
+[`.streamlit/config.toml`](.streamlit/config.toml)). Drop it into any page and
+append `?embed=true` to hide the Streamlit menu and footer:
+
+```html
+<iframe src="https://YOUR-APP.onrender.com/?embed=true"
+        width="100%" height="900" style="border:0"></iframe>
+```
 
 ---
 
