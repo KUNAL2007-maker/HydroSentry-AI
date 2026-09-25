@@ -11,12 +11,16 @@
 A formal, light-theme interface for **HydroSentry-AI**, a physics-guided flood &
 drought early-warning system for the **Upper Bhima Basin (Pune, Maharashtra)**.
 
-> **This is a live simulation.** The dashboard is driven by a self-contained
-> **physics + statistics engine** ([`hydro_engine.py`](hydro_engine.py)) — a gamma
-> unit hydrograph and reservoir mass balance for the flood side, and a
-> soil-moisture bucket with evaporative-stress percentiles for the drought side.
-> Every gauge, chart, table and directive is *computed*, not hard-coded. It runs
-> **fully offline** — no data feeds, no APIs, no GPU, no heavy ML.
+> **Two modes, one console.** A sidebar switch flips between:
+> - **🎬 Demo mode** — a self-contained **physics + statistics engine**
+>   ([`hydro_engine.py`](hydro_engine.py)): a gamma unit hydrograph and reservoir
+>   mass balance for the flood side, a soil-moisture bucket with evaporative-stress
+>   percentiles for the drought side. Every gauge, chart, table and directive is
+>   *computed*, not hard-coded, and it runs **fully offline** — no feeds, no GPU.
+> - **🛰️ Live data** — the *same* engine driven by **real-time observations**
+>   ([`live_data.py`](live_data.py)) for the basin: live rainfall, temperature,
+>   root-zone soil moisture and evapotranspiration. Keyless by default (Open-Meteo),
+>   with a pluggable seam for a keyed/official source. See **[Live data](#live-data)**.
 
 ---
 
@@ -76,6 +80,49 @@ the per-stakeholder directives change with the computed severity.
 
 ---
 
+## Live data
+
+Flip the sidebar to **🛰️ Live data** and the console runs on **real, current
+observations** for the Upper Bhima Basin (Pune, 18.52°N 73.86°E) instead of a
+scripted scenario. The demo stays one click away — the toggle is pinned at the
+top of the sidebar so you can switch back mid-presentation.
+
+**What goes live** (the same `BasinState`, so every tab, gauge and directive just
+works):
+
+| Signal | Source | Feeds |
+| --- | --- | --- |
+| Rainfall now + next-hours peak | Open-Meteo hourly `precipitation` | flood inflow magnitude & timing |
+| Temperature / heat | `temperature_2m`, daily `temperature_2m_max` | drought heat stress |
+| Root-zone soil moisture | `soil_moisture_9_to_27cm` | real drought state (ESR/ESP, days-to-wilting) + trend chart |
+| Evapotranspiration | `et0_fao_evapotranspiration` | real atmospheric demand (PET) |
+| **Current reservoir %** | **manual operator slider** | reservoir mass-balance start |
+
+Khadakwasla storage has no free public live feed, so the *current* reservoir level
+is a labelled operator slider; the rainfall-driven **forecast and pre-release are
+computed live**. This is stated honestly in the UI.
+
+**Keyless by default.** Live mode uses [Open-Meteo](https://open-meteo.com) — a
+free public API that needs no key and speaks HTTPS (so it works on Render and inside
+an iframe). Nothing to configure.
+
+**Pluggable source.** To wire in a keyed/official feed (IMD, a college endpoint, a
+paid API…), implement `CustomProvider.fetch` in [`live_data.py`](live_data.py) and
+select it at runtime:
+
+```bash
+export HYDRO_DATA_PROVIDER=custom
+export HYDRO_API_URL="https://your.endpoint/..."
+export HYDRO_API_KEY="your-key"
+```
+
+**Never crashes.** `fetch_live()` wraps the network in try/except and is cached for
+120 s (the **↻ Refresh now** button forces a fresh pull). If the fetch fails, the
+console shows a clean *"data unavailable — fallback"* badge and a calm neutral state
+instead of an error.
+
+---
+
 ## What's inside
 
 Five tabs, each written for a non-technical reader first:
@@ -119,8 +166,9 @@ without touching the dashboard.
 ```
 PCCOE HYDRO/
 ├── app.py                 # the dashboard (Streamlit, organised by tab)
-├── hydro_engine.py        # the offline physics + statistics engine
-├── requirements.txt       # streamlit + plotly + numpy
+├── hydro_engine.py        # the physics + statistics engine (demo + live)
+├── live_data.py           # real-time basin fetch (Open-Meteo, pluggable)
+├── requirements.txt       # streamlit + plotly + numpy + requests
 ├── render.yaml            # Render Blueprint (one-click cloud deploy)
 ├── README.md              # this file
 ├── .streamlit/
@@ -133,11 +181,15 @@ PCCOE HYDRO/
 
 ## Replacing the simulation with real models
 
-`simulate()` is the single seam. Swap its internals for the production models —
-a PINN flood solver, an MC-LSTM-PET drought forecaster, the Errorcastnet error
-model and the Nugen directive layer — while keeping the `BasinState` fields the
-dashboard reads. The design tokens (colours) live in the `C = {...}` dict and the
-`:root` CSS block so the look stays consistent as components are added.
+`simulate()` is the single seam. It accepts either a demo scenario **or** a
+`Forcing` built from live observations (`forcing_from_live`), so real data already
+flows through it today. Swap its internals for the production models — a PINN flood
+solver, an MC-LSTM-PET drought forecaster, the Errorcastnet error model and the
+Nugen directive layer — while keeping the `BasinState` fields the dashboard reads.
+New live signals plug in the same way: extend `LiveObs` in [`live_data.py`](live_data.py)
+and map them in `forcing_from_live`. The design tokens (colours) live in the
+`C = {...}` dict and the `:root` CSS block so the look stays consistent as
+components are added.
 
 > **Note on the numbers.** Reservoir capacity and a few basin constants are
 > illustrative, chosen so the values stay internally consistent and close to the

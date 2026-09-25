@@ -34,6 +34,7 @@ import time
 import streamlit as st
 
 import hydro_engine as H
+import live_data
 
 try:
     import plotly.graph_objects as go
@@ -400,11 +401,37 @@ def chart_placeholder(text):
 # LIVE SIMULATION STATE  (scenario + playback clock, driven by the engine)
 # ============================================================================
 ss = st.session_state
+ss.setdefault("mode", "demo")           # "demo" (canned scenarios) | "live" (real data)
 ss.setdefault("scenario", "dipole")     # start on the headline dipole crisis
 ss.setdefault("tick", 0)                # simulation step, 0 .. TICKS_MAX
 ss.setdefault("live", True)             # auto-advance the clock?
 ss.setdefault("interval", 2)            # seconds of real time per tick
 ss.setdefault("last_tick_time", time.monotonic())
+ss.setdefault("res_pct", 78)            # live mode: manual current reservoir %
+
+LIVE_REFRESH_SECS = 60                  # how often the live panel refreshes
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def get_live():
+    """Real basin snapshot, cached so the network is hit at most once / 120 s.
+
+    ``fetch_live`` never raises — on any failure it returns a LiveObs with
+    ``ok=False`` and the UI shows a clean 'data unavailable' fallback.
+    """
+    return live_data.fetch_live()
+
+
+def _on_mode_change():
+    # Returning to the demo restarts the scenario clock so it plays from t=0.
+    if ss.mode == "demo":
+        ss.tick = 0
+        ss.last_tick_time = time.monotonic()
+
+
+def _on_refresh_live():
+    # Force the next fetch to go to the network (the button click reruns the app).
+    get_live.clear()
 
 
 def _on_scenario_change():
@@ -460,6 +487,17 @@ def _mins(minutes):
     return f"{int(round(minutes))} min"
 
 
+def _live_val(v, unit="", fmt="{:.1f}"):
+    """Format a real reading for the sidebar; '—' when missing/NaN."""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if not math.isfinite(x):
+        return "—"
+    return fmt.format(x) + unit
+
+
 FLOOD_HEAD = {
     "safe": "Flood risk is low",
     "watch": "Flood risk is building",
@@ -488,60 +526,155 @@ with st.sidebar:
         '</div>'
     )
 
-    # ---- scenario + playback controls (drive the live engine) ----------
-    m('<div class="hs-rail-h">Scenario</div>')
+    # ---- MODE SWITCH — pinned at the top, always visible -----------------
+    # This is the toggle to show during the presentation: flip between the
+    # scripted demo and real, live basin data without leaving the console.
+    m('<div class="hs-rail-h">Mode</div>')
     st.radio(
-        "Scenario", H.SCENARIO_ORDER, key="scenario",
-        format_func=lambda k: H.SCENARIOS[k]["label"],
-        on_change=_on_scenario_change, label_visibility="collapsed",
+        "Mode", ["demo", "live"], key="mode",
+        format_func=lambda k: "🎬  Demo mode" if k == "demo" else "🛰️  Live data",
+        on_change=_on_mode_change, label_visibility="collapsed",
     )
-    m(f'<div class="hs-cap" style="margin:-6px 0 4px;">{H.SCENARIOS[ss.scenario]["desc"]}</div>')
 
-    m('<div class="hs-rail-h">Playback</div>')
-    st.checkbox("Live simulation", key="live", on_change=_on_live_change)
-    st.slider("Seconds per step", 1, 5, key="interval", on_change=_on_interval_change)
-    c_step, c_restart = st.columns(2)
-    with c_step:
-        st.button("Step ▶", on_click=_on_step, disabled=ss.live,
-                  use_container_width=True)
-    with c_restart:
-        st.button("Restart ↻", on_click=_on_restart, use_container_width=True)
+    if ss.mode == "demo":
+        # ---- scenario + playback controls (drive the demo engine) --------
+        m('<div class="hs-rail-h">Scenario</div>')
+        st.radio(
+            "Scenario", H.SCENARIO_ORDER, key="scenario",
+            format_func=lambda k: H.SCENARIOS[k]["label"],
+            on_change=_on_scenario_change, label_visibility="collapsed",
+        )
+        m(f'<div class="hs-cap" style="margin:-6px 0 4px;">{H.SCENARIOS[ss.scenario]["desc"]}</div>')
 
-    if ss.live:
-        m('<span class="hs-live"><span class="hs-live__dot"></span>Live simulation</span>')
+        m('<div class="hs-rail-h">Playback</div>')
+        st.checkbox("Live simulation", key="live", on_change=_on_live_change)
+        st.slider("Seconds per step", 1, 5, key="interval", on_change=_on_interval_change)
+        c_step, c_restart = st.columns(2)
+        with c_step:
+            st.button("Step ▶", on_click=_on_step, disabled=ss.live,
+                      use_container_width=True)
+        with c_restart:
+            st.button("Restart ↻", on_click=_on_restart, use_container_width=True)
+
+        if ss.live:
+            m('<span class="hs-live"><span class="hs-live__dot"></span>Live simulation</span>')
+        else:
+            _done = ss.tick >= H.TICKS_MAX
+            m(f'<span class="hs-badge hs-badge--watch"><span class="hs-dot"></span>'
+              f'{"Scenario complete" if _done else "Paused — manual step"}</span>')
+        m('<div class="hs-updated">Physics + statistics engine · runs on-device</div>')
+
     else:
-        _done = ss.tick >= H.TICKS_MAX
-        m(f'<span class="hs-badge hs-badge--watch"><span class="hs-dot"></span>'
-          f'{"Scenario complete" if _done else "Paused — manual step"}</span>')
-    m('<div class="hs-updated">Physics + statistics engine · runs on-device</div>')
+        # ---- LIVE controls — real observations for the basin -------------
+        obs = get_live()
+        m('<div class="hs-rail-h">Live feed</div>')
+        m('<div class="hs-cap" style="margin:-4px 0 8px;line-height:1.5;">'
+          'Real-time weather &amp; hydrology · <b>Pune</b> (18.52°N, 73.86°E)<br>'
+          'Upper Bhima Basin</div>')
+        st.button("↻  Refresh now", on_click=_on_refresh_live, use_container_width=True)
 
-    m('<div class="hs-rail-h">Data sources</div>')
-    sources = [
-        ("NASA GPM", "Satellite rainfall"),
-        ("Weather radar (NEXRAD)", "Storm-cell tracking"),
-        ("NASA SMAP", "Soil moisture"),
-        ("GLEAM", "Evapotranspiration"),
-    ]
-    src_html = ""
-    for name, desc in sources:
-        src_html += (f'<div class="hs-src"><span class="hs-src__dot"></span>'
-                     f'<div><div class="hs-src__name">{name}</div>'
-                     f'<div class="hs-src__desc">{desc}</div></div></div>')
-    m(src_html)
+        if obs.ok:
+            m('<span class="hs-live"><span class="hs-live__dot"></span>Live data · connected</span>')
+        else:
+            m('<span class="hs-badge hs-badge--warning"><span class="hs-dot"></span>'
+              'Data unavailable — fallback</span>')
+        _when = obs.fetched_at.strftime("%H:%M:%S") if obs.fetched_at else "—"
+        m(f'<div class="hs-updated">Updated <b>{_when}</b> · {obs.source}</div>')
 
-    m('<div class="hs-rail-h">Severity scale</div>')
-    leg = [("safe", "Normal"), ("watch", "Watch"), ("warning", "Elevated"), ("critical", "Critical")]
-    leg_html = ""
-    for lvl, lab in leg:
-        leg_html += (f'<div class="hs-leg"><span class="hs-leg__sw" '
-                     f'style="background:var(--{lvl})"></span>{lab}</div>')
-    m(leg_html)
+        m('<div class="hs-rail-h">Current reservoir %</div>')
+        ss.res_pct = st.slider("Current reservoir %", 0, 100, value=int(ss.res_pct),
+                               label_visibility="collapsed")
+        m('<div class="hs-cap" style="margin:-4px 0 4px;">Khadakwasla storage has no free '
+          'public live feed — set the operator reading here; the rainfall-driven forecast '
+          'and pre-release are computed live.</div>')
+
+        m('<div class="hs-rail-h">Live readings</div>')
+        _rows = [
+            ("Temperature", _live_val(obs.temp_now, " °C")),
+            ("Rain peak (8 h)", _live_val(obs.rain_peak, " mm/hr")),
+            ("Root-zone soil", _live_val(obs.soil_moisture, " m³/m³", "{:.2f}")),
+            ("Reference ET₀", _live_val(obs.et0_now, " mm/d")),
+            ("Humidity", _live_val(obs.humidity, " %", "{:.0f}")),
+        ]
+        _rd = ""
+        for _lab, _val in _rows:
+            _rd += ('<div style="display:flex;justify-content:space-between;gap:10px;'
+                    'padding:6px 0;border-bottom:1px solid var(--line);font-size:12.5px;">'
+                    f'<span style="color:var(--muted);">{_lab}</span>'
+                    '<span style="font-family:\'IBM Plex Mono\',monospace;font-weight:600;'
+                    f'color:var(--brand);">{_val}</span></div>')
+        m(_rd)
+        if not obs.ok and obs.error:
+            m(f'<div class="hs-cap" style="margin-top:8px;color:var(--warning);">'
+              f'Fetch note: {obs.error}</div>')
+
+    # ---- reference panels — collapsed so the controls above never scroll off
+    with st.expander("Data sources", expanded=False):
+        if ss.mode == "live":
+            _dot_ok = "var(--safe)" if obs.ok else "var(--critical)"
+            live_sources = [
+                ("Open-Meteo · rainfall", "Hourly precipitation → flood inflow", _dot_ok),
+                ("Open-Meteo · temperature", "2 m + daily max → heat / drought", _dot_ok),
+                ("Open-Meteo · soil moisture", "Root-zone 9–27 cm → drought state", _dot_ok),
+                ("Open-Meteo · ET₀ (FAO)", "Reference evapotranspiration → PET", _dot_ok),
+                ("Manual reservoir level", "Operator input (no public live feed)", "var(--teal)"),
+                ("+ your keyed source", "Pluggable via HYDRO_DATA_PROVIDER", "var(--muted)"),
+            ]
+            src_html = ""
+            for name, desc, dot in live_sources:
+                src_html += (f'<div class="hs-src"><span class="hs-src__dot" '
+                             f'style="background:{dot}"></span>'
+                             f'<div><div class="hs-src__name">{name}</div>'
+                             f'<div class="hs-src__desc">{desc}</div></div></div>')
+            m(src_html)
+        else:
+            sources = [
+                ("NASA GPM", "Satellite rainfall"),
+                ("Weather radar (NEXRAD)", "Storm-cell tracking"),
+                ("NASA SMAP", "Soil moisture"),
+                ("GLEAM", "Evapotranspiration"),
+            ]
+            src_html = ""
+            for name, desc in sources:
+                src_html += (f'<div class="hs-src"><span class="hs-src__dot"></span>'
+                             f'<div><div class="hs-src__name">{name}</div>'
+                             f'<div class="hs-src__desc">{desc}</div></div></div>')
+            m(src_html)
+
+    with st.expander("Severity scale", expanded=False):
+        leg = [("safe", "Normal"), ("watch", "Watch"), ("warning", "Elevated"), ("critical", "Critical")]
+        leg_html = ""
+        for lvl, lab in leg:
+            leg_html += (f'<div class="hs-leg"><span class="hs-leg__sw" '
+                         f'style="background:var(--{lvl})"></span>{lab}</div>')
+        m(leg_html)
 
 
 # ============================================================================
 # COMMAND HEADER  (rendered inside the live fragment so the clock updates)
 # ============================================================================
-def render_header(s):
+def render_header(s, obs=None):
+    if ss.mode == "live":
+        ok = bool(obs and obs.ok)
+        when = obs.fetched_at.strftime("%H:%M:%S") if (obs and obs.fetched_at) else "—"
+        prov = obs.source if obs else "—"
+        if ok:
+            pill = ('<span class="hs-live"><span class="hs-live__dot"></span>'
+                    f'Live &nbsp;·&nbsp; {when}</span>')
+        else:
+            pill = ('<span class="hs-badge hs-badge--warning"><span class="hs-dot"></span>'
+                    'Live data unavailable</span>')
+        m(
+            '<div class="hs-cmd"><div>'
+            '<div class="hs-cmd__title">Basin Command Console</div>'
+            '<div class="hs-cmd__sub">Live · <b>Pune, Upper Bhima Basin</b> &nbsp;·&nbsp; '
+            f'updated {when} &nbsp;·&nbsp; real-time feed via {prov}.</div>'
+            '</div>'
+            + pill +
+            '</div>'
+        )
+        return
+
     prog = int(round(100 * s.tick / H.TICKS_MAX))
     scen = H.SCENARIOS[s.scenario]["label"]
     done = s.tick >= H.TICKS_MAX
@@ -1031,11 +1164,17 @@ def render_model(s, d):
 # Live dashboard — header + tabs re-render together on every tick
 # ---------------------------------------------------------------------------
 def render_dashboard():
-    _advance_if_due()
-    s = H.simulate(ss.scenario, ss.tick)
+    if ss.mode == "live":
+        obs = get_live()
+        s = H.simulate(H.forcing_from_live(obs, ss.res_pct / 100.0),
+                       H.live_tick_for(obs))
+    else:
+        _advance_if_due()
+        obs = None
+        s = H.simulate(ss.scenario, ss.tick)
     d = H.make_directives(s)
 
-    render_header(s)
+    render_header(s, obs)
 
     tab_over, tab_farm, tab_dam, tab_dis, tab_model = st.tabs([
         "Overview",
@@ -1056,20 +1195,28 @@ def render_dashboard():
         render_model(s, d)
 
 
-# run_every drives the live auto-advance; it becomes None (timer stops) once
-# playback is paused or the scenario reaches its final step.
-st.fragment(
-    render_dashboard,
-    run_every=(ss.interval if (ss.live and ss.tick < H.TICKS_MAX) else None),
-)()
+# run_every drives auto-refresh. In demo mode it advances the scenario clock and
+# stops (None) once paused or the event ends. In live mode it periodically re-runs
+# the panel; the actual network fetch is throttled by get_live's 120 s cache.
+if ss.mode == "live":
+    _run_every = LIVE_REFRESH_SECS
+else:
+    _run_every = ss.interval if (ss.live and ss.tick < H.TICKS_MAX) else None
+
+st.fragment(render_dashboard, run_every=_run_every)()
 
 
 # ============================================================================
 # FOOTER
 # ============================================================================
+_foot_right = (
+    "Real-time observations for the Upper Bhima Basin · physics computed on-device."
+    if ss.mode == "live" else
+    "Live physics + statistics simulation of the Upper Bhima Basin · runs fully offline."
+)
 m(
     '<div class="hs-foot">'
     '<span>HydroSentry-AI — physics-guided flood &amp; drought intelligence · Indradhanu 2026</span>'
-    '<span>Live physics + statistics simulation of the Upper Bhima Basin · runs fully offline.</span>'
+    f'<span>{_foot_right}</span>'
     '</div>'
 )

@@ -1,5 +1,6 @@
 # HydroSentry-AI — runtime dependencies
-# Self-contained live physics + statistics simulation; runs fully offline.
+# Demo mode runs fully offline; Live mode adds a keyless real-time fetch.
 streamlit>=1.36
 plotly>=5.22
 numpy>=1.24
+requests>=2.31          # live_data.py — real-time Open-Meteo fetch (Live mode)

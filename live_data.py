@@ -1,0 +1,293 @@
+"""
+live_data.py — real-time basin observations for HydroSentry-AI
+==============================================================
+
+Fetches LIVE weather + hydrology for the Upper Bhima Basin (Pune, Maharashtra)
+and returns it as a provider-neutral ``LiveObs`` snapshot. The dashboard's
+Live mode feeds this snapshot into the SAME physics engine that drives the
+demo (see ``hydro_engine.forcing_from_live``), so nothing about the UI or the
+physics has to change to run on real data.
+
+Design
+------
+* **Keyless by default.** The default provider is Open-Meteo — a free public
+  API that needs no key, speaks HTTPS (so it works on Render and inside an
+  iframe), and returns real rainfall, temperature, root-zone soil moisture and
+  FAO evapotranspiration for any lat/lon, with hourly + daily forecasts.
+* **Pluggable.** A different source (IMD, a college endpoint, a paid weather
+  API…) can be dropped in later by implementing ``DataProvider.fetch`` and
+  registering it in ``PROVIDERS``. Select one at runtime with the
+  ``HYDRO_DATA_PROVIDER`` environment variable (default ``"open-meteo"``); a
+  keyed source can read ``HYDRO_API_KEY`` / ``HYDRO_API_URL``.
+* **Never crashes.** ``fetch_live`` wraps everything in try/except and returns
+  ``LiveObs(ok=False, error=…)`` on any failure, so the app degrades to a clean
+  "live data unavailable" state instead of throwing.
+
+All numbers here are genuine observations/forecasts — no simulation.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+from dataclasses import dataclass, field
+from datetime import datetime
+
+import numpy as np
+
+try:
+    import requests
+    HAS_REQUESTS = True
+except Exception:                       # pragma: no cover - requests ships with streamlit
+    HAS_REQUESTS = False
+
+
+# ============================================================================
+# Basin definition
+# ============================================================================
+@dataclass
+class Basin:
+    name: str
+    lat: float
+    lon: float
+    tz: str = "Asia/Kolkata"
+
+
+# The monitored basin. Pune sits at the outlet of the Upper Bhima catchment;
+# this point is representative for basin-average rainfall, temperature, soil
+# moisture and evapotranspiration.
+UPPER_BHIMA = Basin("Upper Bhima Basin — Pune", 18.5204, 73.8567, "Asia/Kolkata")
+
+
+# ============================================================================
+# Snapshot container (provider-neutral)
+# ============================================================================
+@dataclass
+class LiveObs:
+    ok: bool = False
+    source: str = "—"
+    fetched_at: datetime | None = None
+    error: str | None = None
+
+    # --- real current readings ------------------------------------------
+    temp_now: float = float("nan")       # °C, 2 m air temperature
+    precip_now: float = 0.0              # mm in the current hour
+    humidity: float = float("nan")       # %, relative humidity
+    soil_moisture: float = float("nan")  # m³/m³, root-zone (9–27 cm)
+    et0_now: float = float("nan")        # mm/day, FAO reference ET
+
+    # --- derived forcing / forecast -------------------------------------
+    rain_peak: float = 0.0               # mm/hr, peak over the flood horizon
+    rain_peak_in_h: float = 0.0          # hours from now to that peak
+    precip_next24: float = 0.0           # mm, total over the next 24 h
+    tmax_fc: float = float("nan")        # °C, forecast daily max
+    heat: float = 0.0                    # °C above the 30 °C drought baseline
+    dry: bool = False                    # little rain coming -> dry spell
+
+    # --- real recent soil-moisture trend (for the drought chart) --------
+    sm_days: np.ndarray = field(default_factory=lambda: np.array([]))
+    sm_series: np.ndarray = field(default_factory=lambda: np.array([]))
+
+
+# ============================================================================
+# Provider interface + implementations
+# ============================================================================
+FLOOD_HORIZON_H = 8          # look-ahead window for the rainfall peak
+DROUGHT_BASELINE_C = 30.0    # temperature baseline (matches hydro_engine)
+DRY_THRESHOLD_MM = 2.0       # <2 mm over the next 24 h == effectively dry
+
+
+class DataProvider:
+    """Base class. Implement ``fetch`` and register in ``PROVIDERS``."""
+
+    name = "base"
+
+    def fetch(self, basin: Basin, timeout: float = 6.0) -> LiveObs:
+        raise NotImplementedError
+
+
+def _to_dt(s: str) -> datetime:
+    """Parse an Open-Meteo ISO timestamp like '2026-09-25T14:00'."""
+    return datetime.fromisoformat(s)
+
+
+def _nearest_index(times: list[str], now: datetime) -> int:
+    """Index of the hourly sample closest to 'now'."""
+    best_i, best_d = 0, None
+    for i, t in enumerate(times):
+        try:
+            d = abs((_to_dt(t) - now).total_seconds())
+        except Exception:
+            continue
+        if best_d is None or d < best_d:
+            best_i, best_d = i, d
+    return best_i
+
+
+class OpenMeteoProvider(DataProvider):
+    """Free, keyless global weather + hydrology (https://open-meteo.com)."""
+
+    name = "Open-Meteo (live)"
+    URL = "https://api.open-meteo.com/v1/forecast"
+
+    def fetch(self, basin: Basin, timeout: float = 6.0) -> LiveObs:
+        if not HAS_REQUESTS:
+            raise RuntimeError("the 'requests' package is not available")
+        params = {
+            "latitude": basin.lat,
+            "longitude": basin.lon,
+            "current": ("temperature_2m,relative_humidity_2m,precipitation,rain,"
+                        "soil_moisture_0_to_1cm"),
+            "hourly": ("precipitation,temperature_2m,soil_moisture_9_to_27cm,"
+                       "et0_fao_evapotranspiration"),
+            "daily": "temperature_2m_max,precipitation_sum,et0_fao_evapotranspiration",
+            "past_days": 2,
+            "forecast_days": 3,
+            "timezone": basin.tz,
+        }
+        r = requests.get(self.URL, params=params, timeout=timeout)
+        r.raise_for_status()
+        return self._map(r.json())
+
+    def _map(self, j: dict) -> LiveObs:
+        o = LiveObs(source=self.name)
+        cur = j.get("current", {}) or {}
+        hourly = j.get("hourly", {}) or {}
+        daily = j.get("daily", {}) or {}
+
+        times = hourly.get("time", []) or []
+        precip = hourly.get("precipitation", []) or []
+        temp_h = hourly.get("temperature_2m", []) or []
+        soil_h = hourly.get("soil_moisture_9_to_27cm", []) or []
+
+        # current readings
+        o.temp_now = _f(cur.get("temperature_2m"))
+        o.precip_now = _f(cur.get("precipitation"), 0.0)
+        o.humidity = _f(cur.get("relative_humidity_2m"))
+
+        # locate "now" within the hourly arrays
+        now = _to_dt(cur["time"]) if cur.get("time") else datetime.now()
+        i = _nearest_index(times, now) if times else 0
+
+        # root-zone soil moisture (real), with a shallow-layer fallback
+        o.soil_moisture = _at(soil_h, i)
+        if not math.isfinite(o.soil_moisture):
+            o.soil_moisture = _f(cur.get("soil_moisture_0_to_1cm"))
+
+        # rainfall: peak intensity over the next FLOOD_HORIZON_H hours
+        fut = precip[i:i + FLOOD_HORIZON_H + 1]
+        if fut:
+            k = int(np.nanargmax(fut))
+            o.rain_peak = float(fut[k])
+            o.rain_peak_in_h = float(k)
+        o.precip_next24 = float(np.nansum(precip[i:i + 24])) if precip else 0.0
+
+        # forecast daily max temperature (drives heat); prefer daily, else hourly
+        dmax = daily.get("temperature_2m_max", []) or []
+        o.tmax_fc = _at(dmax, _today_index(daily, now))
+        if not math.isfinite(o.tmax_fc) and temp_h[i:i + 24]:
+            o.tmax_fc = float(np.nanmax(temp_h[i:i + 24]))
+        o.heat = max(0.0, o.tmax_fc - DROUGHT_BASELINE_C) if math.isfinite(o.tmax_fc) else 0.0
+        o.dry = o.precip_next24 < DRY_THRESHOLD_MM
+
+        # reference evapotranspiration today (mm/day) — real atmospheric demand
+        det = daily.get("et0_fao_evapotranspiration", []) or []
+        o.et0_now = _at(det, _today_index(daily, now))
+        et_h = hourly.get("et0_fao_evapotranspiration", []) or []
+        if not math.isfinite(o.et0_now) and et_h[i:i + 24]:
+            o.et0_now = float(np.nansum(et_h[i:i + 24]))
+
+        # real soil-moisture trend over the past ~48 h -> drought chart
+        lo = max(0, i - 48)
+        xs, ys = [], []
+        for k in range(lo, i + 1):
+            v = _at(soil_h, k)
+            if math.isfinite(v):
+                xs.append((k - lo) / 24.0)     # increasing "days" axis
+                ys.append(v)
+        if len(ys) >= 2:
+            o.sm_days = np.array(xs)
+            o.sm_series = np.array(ys)
+        elif math.isfinite(o.soil_moisture):
+            o.sm_days = np.array([0.0])
+            o.sm_series = np.array([o.soil_moisture])
+        return o
+
+
+class CustomProvider(DataProvider):
+    """Stub for a keyed / official source — wire your own feed in here.
+
+    Read credentials from the environment and map the response into a
+    ``LiveObs`` exactly like ``OpenMeteoProvider._map`` does, then select this
+    provider at runtime with ``HYDRO_DATA_PROVIDER=custom``.
+    """
+
+    name = "Custom (keyed)"
+
+    def fetch(self, basin: Basin, timeout: float = 6.0) -> LiveObs:
+        api_key = os.environ.get("HYDRO_API_KEY")
+        base_url = os.environ.get("HYDRO_API_URL")
+        # TODO: call your source with (base_url, api_key, basin.lat, basin.lon),
+        #       then build and return a LiveObs. Until then this stays disabled
+        #       and the app falls back to Open-Meteo / the offline state.
+        raise NotImplementedError(
+            "Custom data provider is not configured. Set HYDRO_API_URL / "
+            "HYDRO_API_KEY and implement CustomProvider.fetch in live_data.py."
+        )
+
+
+# registry — add your provider here
+PROVIDERS: dict[str, DataProvider] = {
+    "open-meteo": OpenMeteoProvider(),
+    "custom": CustomProvider(),
+}
+
+
+def active_provider() -> DataProvider:
+    """Provider chosen by HYDRO_DATA_PROVIDER (default: open-meteo)."""
+    name = os.environ.get("HYDRO_DATA_PROVIDER", "open-meteo").strip().lower()
+    return PROVIDERS.get(name, PROVIDERS["open-meteo"])
+
+
+# ============================================================================
+# Public entry point
+# ============================================================================
+def fetch_live(basin: Basin = UPPER_BHIMA, timeout: float = 6.0) -> LiveObs:
+    """Fetch a live snapshot. Always returns a LiveObs — never raises."""
+    prov = active_provider()
+    try:
+        obs = prov.fetch(basin, timeout=timeout)
+        obs.ok = True
+        obs.source = prov.name
+        obs.fetched_at = datetime.now()
+        return obs
+    except Exception as e:                          # network down, API change, offline…
+        return LiveObs(ok=False, source=prov.name,
+                       fetched_at=datetime.now(), error=str(e)[:200])
+
+
+# ============================================================================
+# tiny numeric helpers
+# ============================================================================
+def _f(v, default=float("nan")) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _at(arr, i, default=float("nan")) -> float:
+    try:
+        return float(arr[i])
+    except (TypeError, ValueError, IndexError):
+        return default
+
+
+def _today_index(daily: dict, now: datetime) -> int:
+    """Index in the daily arrays whose date matches 'now' (else 0)."""
+    dates = daily.get("time", []) or []
+    today = now.date().isoformat()
+    for i, d in enumerate(dates):
+        if str(d).startswith(today):
+            return i
+    return 0

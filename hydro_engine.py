@@ -129,6 +129,9 @@ class BasinState:
     target_buffer_aft: float = 0.0
     buffer_now_aft: float = 0.0
     spilling: bool = False
+    start_frac: float = RES_START_FRAC   # storage fraction at event start
+    target_peak: float = 0.0             # implied reservoir inflow peak (m³/s)
+    flood_mode: bool = False             # surge above safe channel?
 
     # disaster
     q_downstream: float = 0.0
@@ -230,10 +233,92 @@ def _q_lat(t: float, lat_peak: float) -> float:
 
 
 # ============================================================================
+# Forcing — the inputs that drive one simulation
+# ============================================================================
+# The engine is a pure function of its forcing. In DEMO mode the forcing comes
+# from a canned scenario; in LIVE mode it is built from real observations
+# (see live_data.py). Keeping this one seam means the physics and the whole
+# dashboard are identical in both modes.
+@dataclass
+class Forcing:
+    rain_peak: float                 # catchment-avg effective rainfall peak (mm/hr)
+    heat: float                      # heatwave temperature offset above 30 °C
+    dry: bool                        # dry spell -> no root-zone recharge
+    label: str = "Custom"
+    desc: str = ""
+    source: str = "demo"             # "demo" | "live"
+
+    # --- live-only observation overrides (ignored in demo mode) ---------
+    reservoir_start_frac: float | None = None   # from the manual slider
+    soil_moisture_obs: float | None = None      # real root-zone θ (m³/m³)
+    et0_obs: float | None = None                # real FAO ET₀ (mm/day)
+    temp_obs: float | None = None               # real 2 m temperature (°C)
+    sm_days_obs: np.ndarray | None = None       # real recent soil-moisture x
+    sm_series_obs: np.ndarray | None = None     # real recent soil-moisture y
+
+
+def forcing_from_scenario(scenario: str) -> Forcing:
+    """Build demo forcing from one of the canned SCENARIOS."""
+    cfg = SCENARIOS[scenario]
+    return Forcing(rain_peak=cfg["rain_peak"], heat=cfg["heat"], dry=cfg["dry"],
+                   label=cfg["label"], desc=cfg["desc"], source="demo")
+
+
+def forcing_from_live(obs, reservoir_start_frac: float | None = None) -> Forcing:
+    """Map a live observation snapshot (live_data.LiveObs) to engine forcing.
+
+    On a failed fetch (``obs.ok`` is False) this returns a neutral live forcing
+    so the dashboard still renders a calm, clearly-labelled 'unavailable' state.
+    """
+    if obs is None or not getattr(obs, "ok", False):
+        return Forcing(rain_peak=0.6, heat=0.0, dry=False,
+                       label="Live — data unavailable", source="live",
+                       reservoir_start_frac=reservoir_start_frac,
+                       soil_moisture_obs=0.28, et0_obs=4.0, temp_obs=30.0)
+
+    def _fin(v):
+        return v if (v is not None and math.isfinite(v)) else None
+
+    return Forcing(
+        rain_peak=max(0.0, obs.rain_peak),
+        heat=max(0.0, obs.heat),
+        dry=bool(obs.dry),
+        label=f"Live — {obs.source}",
+        desc="Real-time observations for the Upper Bhima Basin.",
+        source="live",
+        reservoir_start_frac=reservoir_start_frac,
+        soil_moisture_obs=_fin(obs.soil_moisture),
+        et0_obs=_fin(obs.et0_now),
+        temp_obs=_fin(obs.temp_now),
+        sm_days_obs=(obs.sm_days if getattr(obs, "sm_days", None) is not None
+                     and obs.sm_days.size else None),
+        sm_series_obs=(obs.sm_series if getattr(obs, "sm_series", None) is not None
+                       and obs.sm_series.size else None),
+    )
+
+
+def live_tick_for(obs) -> int:
+    """Position the engine clock ('now') from real rainfall timing.
+
+    The reservoir inflow peaks ~``_UH_PEAK_T`` hours after the rain. Placing
+    'now' at ``_UH_PEAK_T - rain_peak_in_h`` makes the live inflow forecast peak
+    line up with the observed rainfall forecast, while reusing all of the
+    existing inflow / reservoir / levee / gate math.
+    """
+    if obs is None or not getattr(obs, "ok", False) or obs.rain_peak <= 0:
+        return 0
+    flood_h = min(FLOOD_HORIZON_H, max(0.0, _UH_PEAK_T - obs.rain_peak_in_h))
+    return int(round(TICKS_MAX * flood_h / FLOOD_HORIZON_H))
+
+
+# ============================================================================
 # Core simulation
 # ============================================================================
-def simulate(scenario: str, tick: int) -> BasinState:
-    cfg = SCENARIOS[scenario]
+def simulate(spec, tick: int) -> BasinState:
+    # forcing comes from a canned scenario (demo) or real observations (live)
+    forcing = spec if isinstance(spec, Forcing) else forcing_from_scenario(spec)
+    scenario_key = spec if isinstance(spec, str) else forcing.source
+    live = forcing.source == "live"
     tick = int(max(0, min(TICKS_MAX, tick)))
     frac = tick / TICKS_MAX
 
@@ -241,14 +326,20 @@ def simulate(scenario: str, tick: int) -> BasinState:
     drought_d = frac * DROUGHT_HORIZON_D
     clock = (BASE_TIME + timedelta(hours=flood_h)).strftime("%d %b %Y, %H:%M IST")
 
-    s = BasinState(scenario=scenario, tick=tick, flood_hours=flood_h,
+    s = BasinState(scenario=scenario_key, tick=tick, flood_hours=flood_h,
                    drought_day=drought_d, clock=clock)
+    s.start_frac = (forcing.reservoir_start_frac
+                    if forcing.reservoir_start_frac is not None else RES_START_FRAC)
 
     # ---- flood forcing --------------------------------------------------
     # target inflow peak grows with cloudburst rainfall volume
-    rain_peak = cfg["rain_peak"]
+    rain_peak = forcing.rain_peak
+    heat = forcing.heat
+    dry = forcing.dry
     target_peak = _target_peak(rain_peak)
     flood_mode = target_peak > SAFE_CHANNEL
+    s.target_peak = target_peak
+    s.flood_mode = flood_mode
     lat_peak = rain_peak * 35.0 if flood_mode else 0.0  # local below-dam runoff peak (m³/s)
     # catchment-average rainfall pulse (mm/hr), cloudburst centred at 1.5 h
     s.rain_now = rain_peak * math.exp(-((flood_h - 1.5) ** 2) / (2 * 0.7 ** 2))
@@ -276,7 +367,7 @@ def simulate(scenario: str, tick: int) -> BasinState:
 
     # ---- reservoir mass balance (integrate 0 -> now) --------------------
     dt = 0.1
-    storage = RES_CAP_AFT * RES_START_FRAC
+    storage = RES_CAP_AFT * s.start_frac
     tt = 0.0
     while tt < flood_h - 1e-9:
         q_in = _inflow(tt, target_peak)
@@ -308,7 +399,7 @@ def simulate(scenario: str, tick: int) -> BasinState:
 
     # ---- drought : soil-moisture bucket + evaporative stress ------------
     def temp_at(d: float) -> float:
-        return 30.0 + cfg["heat"] * min(1.0, d / 8.0)        # smooth heat ramp
+        return 30.0 + heat * min(1.0, d / 8.0)               # smooth heat ramp
 
     def pet_at(d: float) -> float:
         return max(1.0, 0.30 * (temp_at(d) - 5.0))           # mm/day, demand
@@ -325,12 +416,27 @@ def simulate(scenario: str, tick: int) -> BasinState:
         stress = float(np.clip((theta - THETA_WP) / (THETA_FC - THETA_WP), 0, 1))
         et_act_d = pet_at(d) * stress
         # dry spell: no recharge; otherwise the monsoon keeps the root zone wet
-        precip = 0.0 if cfg["dry"] else et_act_d + 0.5
+        precip = 0.0 if dry else et_act_d + 0.5
         theta = float(np.clip(theta + (precip - et_act_d) / ROOT_DEPTH_MM, THETA_WP, THETA_FC))
         series.append(theta)
     s.sm_days = days_axis[-14:] if days_axis.size > 14 else days_axis
     s.sm_series = np.array(series)[-14:] if len(series) > 14 else np.array(series)
     s.soil_moisture = series[-1] if series else THETA_FC
+
+    # LIVE: replace the synthetic soil state with the real observations, so the
+    # drought readouts (ESR, ESP, days-to-wilting, trend chart) reflect reality.
+    if live and forcing.soil_moisture_obs is not None:
+        s.soil_moisture = float(forcing.soil_moisture_obs)
+        if forcing.temp_obs is not None:
+            s.temp = float(forcing.temp_obs)
+        if forcing.et0_obs is not None:
+            s.pet = max(0.1, float(forcing.et0_obs))
+        if forcing.sm_series_obs is not None and forcing.sm_series_obs.size:
+            s.sm_series = np.asarray(forcing.sm_series_obs, dtype=float)
+            s.sm_days = (np.asarray(forcing.sm_days_obs, dtype=float)
+                         if (forcing.sm_days_obs is not None
+                             and forcing.sm_days_obs.size == s.sm_series.size)
+                         else np.arange(s.sm_series.size, dtype=float))
 
     stress_now = float(np.clip((s.soil_moisture - THETA_WP) / (THETA_FC - THETA_WP), 0, 1))
     s.et_actual = s.pet * stress_now
@@ -338,7 +444,7 @@ def simulate(scenario: str, tick: int) -> BasinState:
     s.esp = round(100.0 * _norm_cdf((s.esr - ESR_CLIM_MU) / ESR_CLIM_SD), 1)
 
     # days to wilting: project current drying rate forward
-    if cfg["dry"] and s.soil_moisture > THETA_WP:
+    if dry and s.soil_moisture > THETA_WP:
         dry_rate = max(1e-4, (s.et_actual) / ROOT_DEPTH_MM)   # per day
         s.days_to_wilting = round((s.soil_moisture - THETA_WP) / dry_rate, 1)
     else:
@@ -381,9 +487,8 @@ def gate_schedule(s: BasinState) -> list:
     integrated forward with that rule — so release, level and action agree.
     Each row is tagged done / now / planned relative to the live clock.
     """
-    cfg = SCENARIOS[s.scenario]
-    target_peak = _target_peak(cfg["rain_peak"])
-    flood_mode = target_peak > SAFE_CHANNEL
+    target_peak = s.target_peak
+    flood_mode = s.flood_mode
 
     if flood_mode:
         samples = [
@@ -406,7 +511,7 @@ def gate_schedule(s: BasinState) -> list:
     max_t = targets[-1]
     dt = 0.05
     n_steps = int(round(max_t / dt))
-    storage = RES_CAP_AFT * RES_START_FRAC
+    storage = RES_CAP_AFT * s.start_frac
     levels: dict = {}
     next_i = 0
     for step in range(n_steps + 1):
