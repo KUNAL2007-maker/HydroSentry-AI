@@ -344,6 +344,27 @@ st.markdown("<style>" + CSS + "</style>", unsafe_allow_html=True)
 SEV_LABEL = {"safe": "Normal", "watch": "Watch", "warning": "Elevated", "critical": "Critical"}
 
 
+def _plabels(place):
+    """Heading fragments for a tab, region-aware in live mode.
+
+    ``place`` is a hydro_engine.Place in live mode, or None in demo mode (where
+    the scripted Upper Bhima headings are kept exactly).
+    """
+    if place is None:
+        return {
+            "farmer_sub": "Flash-drought early warning — Junnar &amp; Daund belt",
+            "dam_sub": "Forecast-informed release — Khadakwasla Reservoir",
+            "agri_belt": "Junnar–Daund belt",
+        }
+    # HTML-escape the region-derived belt name for headings
+    belt = place.agri_belt.replace("&", "&amp;")
+    return {
+        "farmer_sub": f"Flash-drought early warning — {belt}",
+        "dam_sub": f"Forecast-informed release — {place.reservoir}",
+        "agri_belt": place.agri_belt,
+    }
+
+
 def m(html):
     """Render a raw HTML block."""
     st.markdown(html, unsafe_allow_html=True)
@@ -562,6 +583,30 @@ def current_basin() -> live_data.Basin:
     return live_data.Basin(ss.region_name, ss.region_lat, ss.region_lon, ss.region_tz)
 
 
+def _esc(text: str) -> str:
+    """Minimal HTML escape for region names woven into the sidebar markup."""
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _brand_loc(name: str) -> str:
+    """'Monitoring / <b>place</b> / region' block for the sidebar, from a region name.
+
+    Region names arrive either em-dash split ('Upper Bhima Basin — Pune') or
+    comma split from geocoding ('Nashik, Maharashtra, India'). Either way the
+    first part is the headline place and the remainder is the sub-line.
+    """
+    raw = (name or "").strip()
+    if "—" in raw:
+        head, _, tail = raw.partition("—")
+    elif "," in raw:
+        head, _, tail = raw.partition(",")
+    else:
+        head, tail = raw, ""
+    head, tail = head.strip() or raw, tail.strip()
+    sub = f"<br>{_esc(tail)}" if tail else ""
+    return f"Monitoring<br><b>{_esc(head)}</b>{sub}"
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def get_live(lat: float, lon: float, name: str, tz: str):
     """Real basin snapshot, cached so the network is hit at most once / 120 s.
@@ -693,13 +738,16 @@ DROUGHT_HEAD = {
 # SIDEBAR — station identity, live state, data sources, legend
 # ============================================================================
 with st.sidebar:
+    _brand_html = (
+        _brand_loc(ss.region_name) if ss.mode == "live"
+        else 'Monitoring<br><b>Upper Bhima Basin</b><br>Pune, Maharashtra'
+    )
     m(
         '<div class="hs-brand">'
         '<div class="hs-brand__mark"><div class="hs-brand__logo">HS</div>'
         '<div><div class="hs-brand__name">HydroSentry-AI</div>'
         '<div class="hs-brand__tag">Flood &amp; drought early warning</div></div></div>'
-        '<div class="hs-brand__loc">Monitoring<br><b>Upper Bhima Basin</b><br>'
-        'Pune, Maharashtra</div>'
+        '<div class="hs-brand__loc">' + _brand_html + '</div>'
         '</div>'
     )
 
@@ -802,9 +850,10 @@ with st.sidebar:
         m('<div class="hs-rail-h">Current reservoir %</div>')
         ss.res_pct = st.slider("Current reservoir %", 0, 100, value=int(ss.res_pct),
                                label_visibility="collapsed")
-        m('<div class="hs-cap" style="margin:-4px 0 4px;">Khadakwasla storage has no free '
-          'public live feed — set the operator reading here; the rainfall-driven forecast '
-          'and pre-release are computed live.</div>')
+        _rshort = _esc(H.place_from_region(ss.region_name).short)
+        m('<div class="hs-cap" style="margin:-4px 0 4px;">'
+          f'{_rshort} has no free public reservoir-level feed — set the current storage '
+          'reading here; the rainfall-driven forecast and pre-release are computed live.</div>')
 
         m('<div class="hs-rail-h">Live readings</div>')
         _rows = [
@@ -919,18 +968,19 @@ def render_header(s, obs=None):
 # ---------------------------------------------------------------------------
 # TAB 1 — OVERVIEW  (dipole hero + metrics + directive feed)
 # ---------------------------------------------------------------------------
-def render_overview(s, d):
+def render_overview(s, d, place=None):
     fsev, dsev = s.flood_sev, s.drought_sev
+    belt = _plabels(place)["agri_belt"]
     flood_desc = (
         "Inflows are near baseline and the reservoir is operating within its normal rule curve."
         if fsev == "safe" else
         "Cloudburst cells over the Western Ghats are feeding fast inflow into the reservoir "
         "system, and local runoff is lifting the urban river stage.")
     drought_desc = (
-        "Root-zone moisture across the Junnar–Daund belt is close to field capacity. "
+        f"Root-zone moisture across the {belt} is close to field capacity. "
         "No irrigation action is required."
         if dsev == "safe" else
-        "Root-zone moisture across the Junnar–Daund belt is dropping faster than crops can "
+        f"Root-zone moisture across the {belt} is dropping faster than crops can "
         "tolerate, well before any visible wilting.")
     m(
         '<div class="hs-dipole">'
@@ -993,9 +1043,9 @@ def render_overview(s, d):
 # ---------------------------------------------------------------------------
 # TAB 2 — FARMER ADVISORY  (flash-drought early warning)
 # ---------------------------------------------------------------------------
-def render_farmer(s, d):
+def render_farmer(s, d, place=None):
     fd = d["farmer"]
-    m(h2("Farmer advisory", "Flash-drought early warning — Junnar &amp; Daund belt"))
+    m(h2("Farmer advisory", _plabels(place)["farmer_sub"]))
     if s.drought_sev in ("warning", "critical"):
         m(note(f"Your soil is drying at the roots <b>{s.lead_time_days} days before</b> the crop "
                "would look thirsty. Acting now, at the right time of day, can save the harvest.",
@@ -1080,9 +1130,9 @@ def render_farmer(s, d):
 # ---------------------------------------------------------------------------
 # TAB 3 — RESERVOIR OPERATIONS  (FIRO pre-release)
 # ---------------------------------------------------------------------------
-def render_dam(s, d):
+def render_dam(s, d, place=None):
     dm = d["dam"]
-    m(h2("Reservoir operations", "Forecast-informed release — Khadakwasla Reservoir"))
+    m(h2("Reservoir operations", _plabels(place)["dam_sub"]))
     m(note("Release a little water <b>now</b> and the reservoir can safely absorb the coming "
            "surge. Wait too long and the only option is an emergency spill that floods "
            "downstream. This schedule keeps a safe buffer without wasting water.",
@@ -1186,7 +1236,7 @@ def render_dam(s, d):
 # ---------------------------------------------------------------------------
 # TAB 4 — DISASTER RESPONSE  (geofenced evacuation)
 # ---------------------------------------------------------------------------
-def render_disaster(s, d):
+def render_disaster(s, d, place=None):
     di = d["disaster"]
     tto = s.time_to_overtop_min
     at_risk = s.households_at_risk
@@ -1370,11 +1420,13 @@ def render_dashboard():
         obs = _get_live_current()
         s = H.simulate(H.forcing_from_live(obs, ss.res_pct / 100.0),
                        H.live_tick_for(obs))
+        place = H.place_from_region(ss.region_name)
     else:
         _advance_if_due()
         obs = None
         s = H.simulate(ss.scenario, ss.tick)
-    d = H.make_directives(s)
+        place = None                     # engine uses the scripted DEMO_PLACE
+    d = H.make_directives(s, place)
 
     render_header(s, obs)
 
@@ -1386,13 +1438,13 @@ def render_dashboard():
         "Model & validation",
     ])
     with tab_over:
-        render_overview(s, d)
+        render_overview(s, d, place)
     with tab_farm:
-        render_farmer(s, d)
+        render_farmer(s, d, place)
     with tab_dam:
-        render_dam(s, d)
+        render_dam(s, d, place)
     with tab_dis:
-        render_disaster(s, d)
+        render_disaster(s, d, place)
     with tab_model:
         render_model(s, d)
 

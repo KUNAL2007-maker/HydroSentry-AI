@@ -284,7 +284,7 @@ def forcing_from_live(obs, reservoir_start_frac: float | None = None) -> Forcing
         heat=max(0.0, obs.heat),
         dry=bool(obs.dry),
         label=f"Live — {obs.source}",
-        desc="Real-time observations for the Upper Bhima Basin.",
+        desc="Real-time observations for the selected basin.",
         source="live",
         reservoir_start_frac=reservoir_start_frac,
         soil_moisture_obs=_fin(obs.soil_moisture),
@@ -294,6 +294,66 @@ def forcing_from_live(obs, reservoir_start_frac: float | None = None) -> Forcing
                      and obs.sm_days.size else None),
         sm_series_obs=(obs.sm_series if getattr(obs, "sm_series", None) is not None
                        and obs.sm_series.size else None),
+    )
+
+
+# ============================================================================
+# Place — the location labels used in the advisory text
+# ============================================================================
+# The physics is location-agnostic, but the plain-language directives name real
+# places ("Junnar–Daund belt", "Khadakwasla Reservoir", "Sectors 4 & 5"). In
+# DEMO mode those scripted names are kept exactly (DEMO_PLACE). In LIVE mode the
+# labels are derived from the selected region so the advisories talk about the
+# place the user picked, not Pune.
+@dataclass
+class Place:
+    region: str          # full region label, e.g. "Nashik, Maharashtra, India"
+    short: str           # short name, e.g. "Nashik"
+    agri_belt: str       # farmland label, e.g. "Nashik agricultural belt"
+    reservoir: str       # reservoir/dam label, e.g. "Nashik reservoir"
+    dam_name: str        # feed dam label (no "Reservoir" suffix), e.g. "Khadakwasla"
+    sectors: str         # riverside zones (plain), e.g. "Sectors 4 and 5"
+    sectors_amp: str     # riverside zones (HTML '&amp;' variant) for meta/feed
+    shelter_phrase: str  # full phrase: where to move residents
+    road_action: str     # full action sentence: closing the riverside road
+
+
+# Exact scripted labels for the demo story (Upper Bhima / Pune). Every fragment
+# reproduces the original hard-coded literal so demo output is byte-identical.
+DEMO_PLACE = Place(
+    region="Upper Bhima Basin — Pune",
+    short="Junnar–Daund",           # feed line reads "Farmers, Junnar–Daund"
+    agri_belt="Junnar–Daund belt",
+    reservoir="Khadakwasla Reservoir",
+    dam_name="Khadakwasla",
+    sectors="Sectors 4 and 5",
+    sectors_amp="Sectors 4 &amp; 5",
+    shelter_phrase="the high-ground shelters on Route H2",
+    road_action="Close the riverside road at the Sector 4 junction to incoming traffic.",
+)
+
+
+def place_from_region(region_name: str) -> Place:
+    """Derive advisory labels from a selected region name.
+
+    ``region_name`` is whatever the picker stored (a preset like
+    "Upper Bhima Basin — Pune" or a geocoded label like
+    "Nashik, Maharashtra, India"). The short name is the first comma- or
+    dash-separated token.
+    """
+    if not region_name:
+        return DEMO_PLACE
+    short = region_name.split(",")[0].split("—")[0].split("-")[0].strip() or region_name
+    return Place(
+        region=region_name,
+        short=short,
+        agri_belt=f"{short} agricultural belt",
+        reservoir=f"{short} reservoir",
+        dam_name=short,
+        sectors="riverside sectors",
+        sectors_amp="riverside sectors",
+        shelter_phrase="the nearest designated high-ground shelters",
+        road_action="Close low-lying riverside access roads to incoming traffic.",
     )
 
 
@@ -562,8 +622,15 @@ def _fmt_time(minutes: float) -> str:
     return f"~{int(round(minutes))} minutes"
 
 
-def make_directives(s: BasinState) -> dict:
-    """Turn the computed state into plain-language, per-stakeholder directives."""
+def make_directives(s: BasinState, place: "Place | None" = None) -> dict:
+    """Turn the computed state into plain-language, per-stakeholder directives.
+
+    ``place`` supplies the location labels used in the advisory text. When it is
+    None (demo mode) the scripted Upper Bhima labels are used, so the demo story
+    is unchanged; Live mode passes a ``Place`` derived from the chosen region.
+    """
+    if place is None:
+        place = DEMO_PLACE
 
     # ---- farmer ---------------------------------------------------------
     if s.drought_sev in ("warning", "critical"):
@@ -571,7 +638,7 @@ def make_directives(s: BasinState) -> dict:
             "severity": s.drought_sev,
             "title": "Start pre-dawn drip irrigation tomorrow",
             "situation": (
-                f"Soil in the Junnar–Daund belt is at the {s.esp:.0f}th percentile of "
+                f"Soil in the {place.agri_belt} is at the {s.esp:.0f}th percentile of "
                 f"evaporative stress and will reach the wilting point in about "
                 f"{s.days_to_wilting:.0f} days. Rapid evaporation is pulling moisture from "
                 f"the root zone faster than the crop can recover on its own."),
@@ -580,7 +647,7 @@ def make_directives(s: BasinState) -> dict:
                 "Water fields with flowering or fruiting crops first.",
                 "Avoid midday watering — most of it evaporates before roots can use it.",
             ],
-            "meta": f"Warning issued {s.lead_time_days} days ahead of visible wilting — Junnar–Daund belt",
+            "meta": f"Warning issued {s.lead_time_days} days ahead of visible wilting — {place.agri_belt}",
             "cert": "Aligned to IMD advisory protocol",
         }
     else:
@@ -594,7 +661,7 @@ def make_directives(s: BasinState) -> dict:
                 "Keep to your normal irrigation schedule.",
                 "Watch the evaporative-stress reading over the next few days.",
             ],
-            "meta": "Junnar–Daund belt — conditions normal",
+            "meta": f"{place.agri_belt} — conditions normal",
             "cert": "Aligned to IMD advisory protocol",
         }
 
@@ -612,7 +679,7 @@ def make_directives(s: BasinState) -> dict:
                 "Begin refilling to the normal rule curve once the recession is confirmed.",
                 "Log the surcharge volume used against the FIRO forecast.",
             ],
-            "meta": f"Post-crest recovery — Khadakwasla Reservoir",
+            "meta": f"Post-crest recovery — {place.reservoir}",
             "cert": "Certified against CWC operation manual",
         }
     elif s.firo_release > BASE_RELEASE + 5:
@@ -628,7 +695,7 @@ def make_directives(s: BasinState) -> dict:
                 f"Target a <b>{s.target_buffer_aft:,.0f} acre-foot</b> buffer before the flood crest arrives.",
                 f"Keep downstream release within the safe channel capacity of {SAFE_CHANNEL:.0f} m³/s.",
             ],
-            "meta": f"Inflow surge expected in {s.inflow_peak_in_h:.1f} hours — Khadakwasla Reservoir",
+            "meta": f"Inflow surge expected in {s.inflow_peak_in_h:.1f} hours — {place.reservoir}",
             "cert": "Certified against CWC operation manual",
         }
     else:
@@ -642,29 +709,29 @@ def make_directives(s: BasinState) -> dict:
                 f"Maintain the normal release of {BASE_RELEASE:.0f} m³/s.",
                 "Keep monitoring upstream rainfall for any change.",
             ],
-            "meta": "Khadakwasla Reservoir — steady state",
+            "meta": f"{place.reservoir} — steady state",
             "cert": "Certified against CWC operation manual",
         }
 
     # ---- disaster team --------------------------------------------------
     if math.isfinite(s.time_to_overtop_min) and s.overtop_depth > 0.1:
         imminent = s.time_to_overtop_min <= 1
-        title = ("Evacuate low-lying Sectors 4 and 5 now — levee overtopping"
+        title = (f"Evacuate low-lying {place.sectors} now — levee overtopping"
                  if imminent else
-                 f"Evacuate low-lying Sectors 4 and 5 within {int(round(s.time_to_overtop_min))} minutes")
+                 f"Evacuate low-lying {place.sectors} within {int(round(s.time_to_overtop_min))} minutes")
         disaster = {
             "severity": "critical" if s.time_to_overtop_min <= 100 else "warning",
             "title": title,
             "situation": (
                 f"The river will rise about {s.overtop_depth:.1f} m above the levee crest at "
-                f"Sectors 4 and 5 ({_fmt_time(s.time_to_overtop_min)}). "
+                f"{place.sectors} ({_fmt_time(s.time_to_overtop_min)}). "
                 f"Areas below 542 m elevation are at risk of inundation."),
             "actions": [
                 "Begin geofenced evacuation for all zones <b>below 542 m elevation</b>.",
-                "Move residents to the high-ground shelters on Route H2.",
-                "Close the riverside road at the Sector 4 junction to incoming traffic.",
+                f"Move residents to {place.shelter_phrase}.",
+                place.road_action,
             ],
-            "meta": f"Impact {_fmt_time(s.time_to_overtop_min)} — Sectors 4 &amp; 5",
+            "meta": f"Impact {_fmt_time(s.time_to_overtop_min)} — {place.sectors_amp}",
             "cert": "Aligned to district disaster-management SOP",
         }
     else:
@@ -708,17 +775,17 @@ def make_directives(s: BasinState) -> dict:
     base = BASE_TIME + timedelta(hours=s.flood_hours)
     if disaster["severity"] != "safe":
         feed.append((base.strftime("%H:%M"), disaster["severity"],
-                     "<b>Sectors 4 &amp; 5:</b> prepare geofenced evacuation, "
+                     f"<b>{place.sectors_amp}:</b> prepare geofenced evacuation, "
                      f"impact expected {_fmt_time(s.time_to_overtop_min)}."))
     if s.firo_release > BASE_RELEASE + 5 and not s.past_peak:
         feed.append(((base - timedelta(minutes=18)).strftime("%H:%M"), dam["severity"],
-                     f"<b>Khadakwasla dam:</b> begin {s.firo_release:.0f} m³/s controlled pre-release."))
+                     f"<b>{place.dam_name} dam:</b> begin {s.firo_release:.0f} m³/s controlled pre-release."))
     elif s.firo_release > BASE_RELEASE + 5 and s.past_peak:
         feed.append(((base - timedelta(minutes=18)).strftime("%H:%M"), "watch",
-                     "<b>Khadakwasla dam:</b> surge crest absorbed — holding safe-channel release."))
+                     f"<b>{place.dam_name} dam:</b> surge crest absorbed — holding safe-channel release."))
     if farmer["severity"] in ("warning", "critical"):
         feed.append(((base - timedelta(minutes=32)).strftime("%H:%M"), farmer["severity"],
-                     "<b>Farmers, Junnar–Daund:</b> start pre-dawn drip irrigation to protect roots."))
+                     f"<b>Farmers, {place.short}:</b> start pre-dawn drip irrigation to protect roots."))
     if not feed:
         feed.append((base.strftime("%H:%M"), "safe",
                      "<b>Basin normal:</b> no directives active. Continuing routine monitoring."))
