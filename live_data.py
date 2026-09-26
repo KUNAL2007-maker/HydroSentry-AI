@@ -42,6 +42,19 @@ except Exception:                       # pragma: no cover - requests ships with
     HAS_REQUESTS = False
 
 
+# ----------------------------------------------------------------------------
+# Network tuning
+# ----------------------------------------------------------------------------
+# A local dev box reaches Open-Meteo in ~1-2 s, but a hosted instance (e.g.
+# Render, US) hitting Open-Meteo (EU) over a possibly-cold connection can take
+# longer — a tight 6 s timeout there shows a false "data unavailable". So use a
+# generous default timeout and one retry with a growing budget. Both are
+# overridable from the environment for stricter/looser hosting.
+HTTP_TIMEOUT = float(os.environ.get("HYDRO_HTTP_TIMEOUT", "") or 12.0)
+HTTP_RETRIES = int(os.environ.get("HYDRO_HTTP_RETRIES", "") or 1)
+HTTP_HEADERS = {"User-Agent": "HydroSentry-AI/1.0 (+https://hydrosentry-ai.onrender.com)"}
+
+
 # ============================================================================
 # Basin definition
 # ============================================================================
@@ -106,6 +119,7 @@ def search_places(query: str, count: int = 6, timeout: float = 6.0) -> list[Basi
             GEOCODE_URL,
             params={"name": query, "count": count, "language": "en", "format": "json"},
             timeout=timeout,
+            headers=HTTP_HEADERS,
         )
         resp.raise_for_status()
         results = resp.json().get("results") or []
@@ -208,7 +222,7 @@ class OpenMeteoProvider(DataProvider):
             "forecast_days": 3,
             "timezone": basin.tz,
         }
-        r = requests.get(self.URL, params=params, timeout=timeout)
+        r = requests.get(self.URL, params=params, timeout=timeout, headers=HTTP_HEADERS)
         r.raise_for_status()
         return self._map(r.json())
 
@@ -315,18 +329,29 @@ def active_provider() -> DataProvider:
 # ============================================================================
 # Public entry point
 # ============================================================================
-def fetch_live(basin: Basin = UPPER_BHIMA, timeout: float = 6.0) -> LiveObs:
-    """Fetch a live snapshot. Always returns a LiveObs — never raises."""
+def fetch_live(basin: Basin = UPPER_BHIMA, timeout: float | None = None) -> LiveObs:
+    """Fetch a live snapshot. Always returns a LiveObs — never raises.
+
+    Retries a couple of times with a growing timeout: a hosted instance's first
+    outbound call to Open-Meteo can be slow, and a single short attempt would
+    otherwise show a false "data unavailable". Only if every attempt fails do we
+    return ``ok=False`` (with the last error) so the UI can explain what happened.
+    """
     prov = active_provider()
-    try:
-        obs = prov.fetch(basin, timeout=timeout)
-        obs.ok = True
-        obs.source = prov.name
-        obs.fetched_at = datetime.now()
-        return obs
-    except Exception as e:                          # network down, API change, offline…
-        return LiveObs(ok=False, source=prov.name,
-                       fetched_at=datetime.now(), error=str(e)[:200])
+    budget = HTTP_TIMEOUT if timeout is None else timeout
+    last_err: Exception | None = None
+    for _ in range(max(1, HTTP_RETRIES + 1)):
+        try:
+            obs = prov.fetch(basin, timeout=budget)
+            obs.ok = True
+            obs.source = prov.name
+            obs.fetched_at = datetime.now()
+            return obs
+        except Exception as e:                      # network down, API change, offline…
+            last_err = e
+            budget = min(budget * 1.6, 30.0)        # give the next attempt more room
+    return LiveObs(ok=False, source=prov.name,
+                   fetched_at=datetime.now(), error=str(last_err)[:200])
 
 
 # ============================================================================

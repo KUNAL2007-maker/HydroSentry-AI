@@ -844,6 +844,11 @@ with st.sidebar:
         else:
             m('<span class="hs-badge hs-badge--warning"><span class="hs-dot"></span>'
               'Data unavailable — fallback</span>')
+            if obs.error:
+                m('<div class="hs-cap" style="color:var(--warning);margin:4px 0 2px;'
+                  'word-break:break-word;">Reason: ' + _esc(obs.error) + '</div>')
+            m('<div class="hs-cap" style="margin:2px 0 2px;">The forecast physics still '
+              'runs on safe fallback values — tap “Refresh now” to retry the live feed.</div>')
         _when = obs.fetched_at.strftime("%H:%M:%S") if obs.fetched_at else "—"
         m(f'<div class="hs-updated">Updated <b>{_when}</b> · {obs.source}</div>')
 
