@@ -42,6 +42,13 @@ try:
 except Exception:                      # plotly optional; UI still renders without it
     HAS_PLOTLY = False
 
+try:
+    import pydeck as pdk
+    import pandas as pd
+    HAS_PYDECK = True
+except Exception:                      # pydeck optional; maps fall back to a static panel
+    HAS_PYDECK = False
+
 
 # ----------------------------------------------------------------------------
 # Page configuration
@@ -398,6 +405,138 @@ def chart_placeholder(text):
 
 
 # ============================================================================
+# MAPS  (real interactive pydeck maps — tokenless CARTO basemap)
+# ============================================================================
+def _rgb(hex_color, alpha=220):
+    """'#1F5FB0' -> [31, 95, 176, alpha] for pydeck fill colors."""
+    h = hex_color.lstrip("#")
+    return [int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), alpha]
+
+
+def _sev_color(sev, alpha=220):
+    return _rgb(C.get(sev, C["teal"]), alpha)
+
+
+def _deck_map(df, center_lat, center_lon, zoom=10.5, height=243, radius_scale=1.0):
+    """Interactive pydeck map with severity-colored markers over a tokenless
+    CARTO basemap. ``df`` needs columns: lat, lon, color (RGBA list), radius,
+    label, detail. Falls back to a static panel if pydeck is unavailable."""
+    if not HAS_PYDECK:
+        chart_placeholder("Interactive map — install pydeck to enable")
+        return
+
+    layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=df,
+        get_position="[lon, lat]",
+        get_fill_color="color",
+        get_radius="radius",
+        radius_scale=radius_scale,
+        radius_min_pixels=6,
+        radius_max_pixels=60,
+        pickable=True,
+        opacity=0.85,
+        stroked=True,
+        get_line_color=[255, 255, 255, 220],
+        line_width_min_pixels=1.5,
+    )
+    view = pdk.ViewState(latitude=center_lat, longitude=center_lon,
+                         zoom=zoom, pitch=0, bearing=0)
+    deck = pdk.Deck(
+        layers=[layer],
+        initial_view_state=view,
+        map_style=pdk.map_styles.CARTO_LIGHT,   # tokenless — no Mapbox key
+        tooltip={"html": "<b>{label}</b><br/>{detail}",
+                 "style": {"backgroundColor": C["brand"], "color": "white",
+                           "fontSize": "12px", "padding": "6px 8px"}},
+    )
+    st.pydeck_chart(deck, use_container_width=True, height=height)
+
+
+_SEV_RANK = {"safe": 0, "watch": 1, "warning": 2, "critical": 3}
+
+
+def render_basin_snapshot(s, height=243):
+    """Overview map: the monitored basin centre plus indicative flood/drought
+    hotspots, colored by the live flood & drought severity."""
+    lat, lon = ss.region_lat, ss.region_lon
+    worst = max(s.flood_sev, s.drought_sev, key=lambda x: _SEV_RANK.get(x, 0))
+    rows = [
+        # basin centre — colored by the more severe of the two hazards
+        {"lat": lat, "lon": lon, "color": _sev_color(worst),
+         "radius": 900, "label": ss.region_name,
+         "detail": f"Flood: {SEV_LABEL[s.flood_sev]} · Drought: {SEV_LABEL[s.drought_sev]}"},
+        # agricultural belt (drought signal) — indicative position NE of centre
+        {"lat": lat + 0.10, "lon": lon + 0.12, "color": _sev_color(s.drought_sev),
+         "radius": 620, "label": "Agricultural belt (indicative)",
+         "detail": f"Drought: {SEV_LABEL[s.drought_sev]} · ESP {s.esp:.0f}th %ile"},
+        # riverside / reservoir (flood signal) — indicative position SW of centre
+        {"lat": lat - 0.09, "lon": lon - 0.10, "color": _sev_color(s.flood_sev),
+         "radius": 620, "label": "Riverside & reservoir (indicative)",
+         "detail": f"Flood: {SEV_LABEL[s.flood_sev]} · reservoir {s.reservoir_pct:.0f}%"},
+    ]
+    if HAS_PYDECK:
+        _deck_map(pd.DataFrame(rows), lat, lon, zoom=9.2, height=height)
+    else:
+        _deck_map(None, lat, lon, height=height)
+    m('<div class="hs-map__legend" style="position:static;margin-top:8px;">'
+      '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--flood)"></span>Flood signal</span>'
+      '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--drought)"></span>Drought signal</span>'
+      '</div>'
+      '<div class="hs-cap" style="margin-top:4px;">Basin centre uses live coordinates; '
+      'hotspot markers are indicative placements around the centre.</div>')
+
+
+def render_evacuation_map(s, tto, at_risk, height=320):
+    """Disaster map: riverside sectors around the basin centre, colored by time
+    to impact. Sector positions are indicative (no per-sector geometry feed)."""
+    lat, lon = ss.region_lat, ss.region_lon
+    finite = math.isfinite(tto)
+
+    def _tsev(mins):
+        if not math.isfinite(mins):
+            return "safe"
+        if mins <= 100:
+            return "critical"
+        if mins <= 180:
+            return "warning"
+        return "safe"
+
+    # three riverside sectors, staged along an indicative line near the centre
+    sectors = [
+        ("Sector 4 — riverfront", lat - 0.035, lon - 0.045, tto,
+         round(at_risk * 0.41) if finite else 0),
+        ("Sector 5 — low road", lat - 0.055, lon - 0.020, tto + 15 if finite else float("inf"),
+         round(at_risk * 0.59) if finite else 0),
+        ("Sector 6 — market", lat - 0.070, lon + 0.010, tto + 90 if finite else float("inf"),
+         300 if finite else 0),
+    ]
+    rows = []
+    for name, sl, so, mins, hh in sectors:
+        sev = _tsev(mins)
+        when = "no impact expected" if not math.isfinite(mins) else (
+            "impact imminent" if mins <= 1 else f"impact in ~{int(round(mins))} min")
+        rows.append({"lat": sl, "lon": so, "color": _sev_color(sev),
+                     "radius": 500, "label": f"{name} (indicative)",
+                     "detail": f"{when} · {hh:,} households"})
+    # a safe-ground shelter marker
+    rows.append({"lat": lat + 0.02, "lon": lon + 0.03, "color": _sev_color("safe"),
+                 "radius": 420, "label": "High-ground shelter (Route H2)",
+                 "detail": "Safe assembly point"})
+    if HAS_PYDECK:
+        _deck_map(pd.DataFrame(rows), lat - 0.03, lon - 0.02, zoom=11.5, height=height)
+    else:
+        _deck_map(None, lat, lon, height=height)
+    m('<div class="hs-map__legend" style="position:static;margin-top:8px;">'
+      '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--critical)"></span>Evacuate now</span>'
+      '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--warning)"></span>Stand by</span>'
+      '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--safe)"></span>Safe ground</span>'
+      '</div>'
+      '<div class="hs-cap" style="margin-top:4px;">Sector positions are indicative placements '
+      'around the basin centre; severity tracks the live time-to-impact.</div>')
+
+
+# ============================================================================
 # LIVE SIMULATION STATE  (scenario + playback clock, driven by the engine)
 # ============================================================================
 ss = st.session_state
@@ -408,18 +547,38 @@ ss.setdefault("live", True)             # auto-advance the clock?
 ss.setdefault("interval", 2)            # seconds of real time per tick
 ss.setdefault("last_tick_time", time.monotonic())
 ss.setdefault("res_pct", 78)            # live mode: manual current reservoir %
+# live mode: the selected region (defaults to the headline basin)
+ss.setdefault("region_name", live_data.UPPER_BHIMA.name)
+ss.setdefault("region_lat", live_data.UPPER_BHIMA.lat)
+ss.setdefault("region_lon", live_data.UPPER_BHIMA.lon)
+ss.setdefault("region_tz", live_data.UPPER_BHIMA.tz)
+ss.setdefault("place_query", "")        # free-text search box contents
 
 LIVE_REFRESH_SECS = 60                  # how often the live panel refreshes
 
 
+def current_basin() -> live_data.Basin:
+    """The region the live view is looking at (selected preset or searched place)."""
+    return live_data.Basin(ss.region_name, ss.region_lat, ss.region_lon, ss.region_tz)
+
+
 @st.cache_data(ttl=120, show_spinner=False)
-def get_live():
+def get_live(lat: float, lon: float, name: str, tz: str):
     """Real basin snapshot, cached so the network is hit at most once / 120 s.
+
+    Keyed on the region (lat/lon/name/tz) so switching region fetches fresh
+    data instead of serving the previous place from cache.
 
     ``fetch_live`` never raises — on any failure it returns a LiveObs with
     ``ok=False`` and the UI shows a clean 'data unavailable' fallback.
     """
-    return live_data.fetch_live()
+    return live_data.fetch_live(live_data.Basin(name, lat, lon, tz))
+
+
+def _get_live_current():
+    """get_live() for the region currently in session state."""
+    b = current_basin()
+    return get_live(b.lat, b.lon, b.name, b.tz)
 
 
 def _on_mode_change():
@@ -432,6 +591,24 @@ def _on_mode_change():
 def _on_refresh_live():
     # Force the next fetch to go to the network (the button click reruns the app).
     get_live.clear()
+
+
+def _set_region(basin):
+    """Point the live view at a new region and force a fresh fetch."""
+    ss.region_name = basin.name
+    ss.region_lat = basin.lat
+    ss.region_lon = basin.lon
+    ss.region_tz = basin.tz
+    get_live.clear()
+
+
+def _on_preset_change():
+    # The preset selectbox stores its label; map it back to a Basin.
+    label = ss.get("preset_choice")
+    for b in live_data.PRESETS:
+        if b.name == label:
+            _set_region(b)
+            break
 
 
 def _on_scenario_change():
@@ -566,11 +743,52 @@ with st.sidebar:
 
     else:
         # ---- LIVE controls — real observations for the basin -------------
-        obs = get_live()
+        # Region picker: pick a ready-made basin, or search any place on Earth.
+        m('<div class="hs-rail-h">Region</div>')
+        _preset_labels = [b.name for b in live_data.PRESETS]
+        _cur = ss.region_name
+        # If the current region came from a search (not a preset), show it as a
+        # transient first option so the selectbox reflects reality.
+        if _cur not in _preset_labels:
+            _options = [_cur] + _preset_labels
+        else:
+            _options = _preset_labels
+        st.selectbox("Preset basin", _options,
+                     index=_options.index(_cur) if _cur in _options else 0,
+                     key="preset_choice", on_change=_on_preset_change,
+                     label_visibility="collapsed")
+
+        with st.form("place_search", clear_on_submit=False, border=False):
+            _q = st.text_input("Search any place", value=ss.place_query,
+                               placeholder="Search any place (e.g. Nashik, Solapur)…",
+                               label_visibility="collapsed")
+            _go = st.form_submit_button("🔍  Search", use_container_width=True)
+        if _go and _q.strip():
+            ss.place_query = _q
+            _matches = live_data.search_places(_q)
+            ss.place_matches = [(b.name, b.lat, b.lon, b.tz) for b in _matches]
+            if _matches:
+                _set_region(_matches[0])   # jump to the best match immediately
+                st.rerun()
+            else:
+                ss.place_matches = []
+        _matches = ss.get("place_matches") or []
+        if len(_matches) > 1:
+            m('<div class="hs-cap" style="margin:2px 0 4px;">Other matches</div>')
+            for _nm, _la, _lo, _tz in _matches[1:5]:
+                if st.button(_nm, key=f"place_{_nm}_{_la:.3f}", use_container_width=True):
+                    _set_region(live_data.Basin(_nm, _la, _lo, _tz))
+                    st.rerun()
+        elif ss.get("place_query") and not _matches:
+            m('<div class="hs-cap" style="color:var(--warning);margin:2px 0 6px;">'
+              'No places matched that search.</div>')
+
+        obs = _get_live_current()
+        _b = current_basin()
         m('<div class="hs-rail-h">Live feed</div>')
         m('<div class="hs-cap" style="margin:-4px 0 8px;line-height:1.5;">'
-          'Real-time weather &amp; hydrology · <b>Pune</b> (18.52°N, 73.86°E)<br>'
-          'Upper Bhima Basin</div>')
+          f'Real-time weather &amp; hydrology · <b>{_b.name}</b><br>'
+          f'{_b.lat:.4f}°N, {_b.lon:.4f}°E</div>')
         st.button("↻  Refresh now", on_click=_on_refresh_live, use_container_width=True)
 
         if obs.ok:
@@ -667,7 +885,7 @@ def render_header(s, obs=None):
         m(
             '<div class="hs-cmd"><div>'
             '<div class="hs-cmd__title">Basin Command Console</div>'
-            '<div class="hs-cmd__sub">Live · <b>Pune, Upper Bhima Basin</b> &nbsp;·&nbsp; '
+            f'<div class="hs-cmd__sub">Live · <b>{ss.region_name}</b> &nbsp;·&nbsp; '
             f'updated {when} &nbsp;·&nbsp; real-time feed via {prov}.</div>'
             '</div>'
             + pill +
@@ -769,14 +987,7 @@ def render_overview(s, d):
         m('<div class="hs-panel hs-feed">' + rows + '</div>')
     with col_b:
         m(h2("Basin snapshot", "Live overview"))
-        m('<div class="hs-map" style="height:243px;">'
-          '<span class="hs-map__tag">Upper Bhima Basin</span>'
-          '<div class="hs-map__mid">🗺️<br>Interactive basin map<br>'
-          '<span class="hs-cap">renders here in the live build</span></div>'
-          '<div class="hs-map__legend">'
-          '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--flood)"></span>Flood watch</span>'
-          '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--drought)"></span>Drought</span>'
-          '</div></div>')
+        render_basin_snapshot(s, height=243)
 
 
 # ---------------------------------------------------------------------------
@@ -1043,16 +1254,7 @@ def render_disaster(s, d):
 
     with col_r:
         m(h2("Evacuation map", "Geofenced risk zones"))
-        # >>> HOOK: geofenced inundation map (pydeck / folium) renders here
-        m('<div class="hs-map">'
-          '<span class="hs-map__tag">Riverside sectors — live geofence</span>'
-          '<div class="hs-map__mid">🚨<br>Geofenced evacuation map<br>'
-          '<span class="hs-cap">inundation depth &amp; safe routes render here in the live build</span></div>'
-          '<div class="hs-map__legend">'
-          '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--critical)"></span>Evacuate now</span>'
-          '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--warning)"></span>Stand by</span>'
-          '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--safe)"></span>Safe ground</span>'
-          '</div></div>')
+        render_evacuation_map(s, tto, at_risk, height=320)
         st.write("")
         if not math.isfinite(tto):
             ti_val, ti_unit = "—", ""
@@ -1165,7 +1367,7 @@ def render_model(s, d):
 # ---------------------------------------------------------------------------
 def render_dashboard():
     if ss.mode == "live":
-        obs = get_live()
+        obs = _get_live_current()
         s = H.simulate(H.forcing_from_live(obs, ss.res_pct / 100.0),
                        H.live_tick_for(obs))
     else:
@@ -1210,7 +1412,7 @@ st.fragment(render_dashboard, run_every=_run_every)()
 # FOOTER
 # ============================================================================
 _foot_right = (
-    "Real-time observations for the Upper Bhima Basin · physics computed on-device."
+    f"Real-time observations for {ss.region_name} · physics computed on-device."
     if ss.mode == "live" else
     "Live physics + statistics simulation of the Upper Bhima Basin · runs fully offline."
 )

@@ -59,6 +59,69 @@ class Basin:
 UPPER_BHIMA = Basin("Upper Bhima Basin — Pune", 18.5204, 73.8567, "Asia/Kolkata")
 
 
+# A few ready-made basins / cities so a presenter can switch region with one
+# click, without typing. The first entry is the app's default basin.
+PRESETS: list[Basin] = [
+    UPPER_BHIMA,
+    Basin("Nashik — Upper Godavari", 19.9975, 73.7898, "Asia/Kolkata"),
+    Basin("Nagpur — Wainganga Basin", 21.1458, 79.0882, "Asia/Kolkata"),
+    Basin("Mumbai — coastal", 19.0760, 72.8777, "Asia/Kolkata"),
+    Basin("Kolhapur — Panchganga", 16.7050, 74.2433, "Asia/Kolkata"),
+    Basin("Hyderabad — Musi Basin", 17.3850, 78.4867, "Asia/Kolkata"),
+    Basin("Bengaluru — Arkavathy", 12.9716, 77.5946, "Asia/Kolkata"),
+    Basin("Delhi — Yamuna Basin", 28.6139, 77.2090, "Asia/Kolkata"),
+]
+
+
+# ============================================================================
+# Geocoding — turn a free-text place name into Basin(s)
+# ============================================================================
+GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
+
+
+def _place_label(r: dict) -> str:
+    """Human label from an Open-Meteo geocoding result: 'Nashik, Maharashtra, India'."""
+    parts = [r.get("name")]
+    admin1 = r.get("admin1")
+    country = r.get("country")
+    if admin1 and admin1 != r.get("name"):
+        parts.append(admin1)
+    if country:
+        parts.append(country)
+    return ", ".join(p for p in parts if p)
+
+
+def search_places(query: str, count: int = 6, timeout: float = 6.0) -> list[Basin]:
+    """Search any place by name (Open-Meteo geocoding, keyless).
+
+    Returns a list of ``Basin`` matches, best first. Never raises — on an
+    empty query, missing ``requests``, or any network/API failure it returns
+    ``[]`` so the caller can show 'no matches' cleanly.
+    """
+    query = (query or "").strip()
+    if not query or not HAS_REQUESTS:
+        return []
+    try:
+        resp = requests.get(
+            GEOCODE_URL,
+            params={"name": query, "count": count, "language": "en", "format": "json"},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results") or []
+    except Exception:
+        return []
+
+    out: list[Basin] = []
+    for r in results:
+        lat, lon = _f(r.get("latitude")), _f(r.get("longitude"))
+        if not (math.isfinite(lat) and math.isfinite(lon)):
+            continue
+        out.append(Basin(_place_label(r), lat, lon,
+                         r.get("timezone") or "Asia/Kolkata"))
+    return out
+
+
 # ============================================================================
 # Snapshot container (provider-neutral)
 # ============================================================================

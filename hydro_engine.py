@@ -682,14 +682,26 @@ def make_directives(s: BasinState) -> dict:
             "cert": "Aligned to district disaster-management SOP",
         }
 
-    # ---- SMS body (numbers filled from state) ---------------------------
-    sms = {
-        "mr": ("सावधान: पुढील २४ तासांत तीव्र बाष्पीभवन अपेक्षित आहे. पिकांचे नुकसान "
-               "टाळण्यासाठी उद्या पहाटे ४:०० वाजता ४५ मिनिटे ठिबक सिंचन सुरू करा."),
-        "en": ("Alert: Intense evaporation is expected in the next 24 hours. To protect your "
-               "crop, run drip irrigation for 45 minutes tomorrow at 4:00 AM."),
-        "sent": 1240,
-    }
+    # ---- SMS body -------------------------------------------------------
+    # Mirrors the farmer directive above: an irrigation alert only goes out
+    # when the drought state is a warning/critical. Otherwise farmers receive
+    # an all-clear so the SMS never contradicts the on-screen "Normal" status.
+    if s.drought_sev in ("warning", "critical"):
+        sms = {
+            "mr": ("सावधान: पुढील २४ तासांत तीव्र बाष्पीभवन अपेक्षित आहे. पिकांचे नुकसान "
+                   "टाळण्यासाठी उद्या पहाटे ४:०० वाजता ४५ मिनिटे ठिबक सिंचन सुरू करा."),
+            "en": ("Alert: Intense evaporation is expected in the next 24 hours. To protect your "
+                   "crop, run drip irrigation for 45 minutes tomorrow at 4:00 AM."),
+            "sent": 1240,
+        }
+    else:
+        sms = {
+            "mr": ("माहिती: जमिनीतील ओलावा सध्या पुरेसा आहे. सिंचनाची गरज नाही — नेहमीचे "
+                   "वेळापत्रक सुरू ठेवा. उद्या पुन्हा तपासा."),
+            "en": ("Update: Soil moisture is currently adequate. No irrigation needed — keep to "
+                   "your normal schedule. We'll re-check tomorrow."),
+            "sent": 1240,
+        }
 
     # ---- overview activity feed ----------------------------------------
     feed = []
