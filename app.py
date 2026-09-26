@@ -607,15 +607,20 @@ def _brand_loc(name: str) -> str:
     return f"Monitoring<br><b>{_esc(head)}</b>{sub}"
 
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def get_live(lat: float, lon: float, name: str, tz: str):
-    """Real basin snapshot, cached so the network is hit at most once / 120 s.
+    """Real basin snapshot, cached so the network is hit at most once / 5 min.
+
+    A 5-minute TTL keeps outbound calls sparse (Open-Meteo rate-limits by IP,
+    and a shared hosting IP is easy to trip) while staying fresh — the API's
+    current-conditions only update every ~15 min anyway.
 
     Keyed on the region (lat/lon/name/tz) so switching region fetches fresh
     data instead of serving the previous place from cache.
 
-    ``fetch_live`` never raises — on any failure it returns a LiveObs with
-    ``ok=False`` and the UI shows a clean 'data unavailable' fallback.
+    ``fetch_live`` never raises. On a transient failure it serves the last good
+    reading (``ok=True, stale=True``); only with no cached reading does it
+    return ``ok=False`` and the UI shows a clean 'data unavailable' fallback.
     """
     return live_data.fetch_live(live_data.Basin(name, lat, lon, tz))
 
@@ -839,8 +844,16 @@ with st.sidebar:
           f'{_b.lat:.4f}°N, {_b.lon:.4f}°E</div>')
         st.button("↻  Refresh now", on_click=_on_refresh_live, use_container_width=True)
 
-        if obs.ok:
+        if obs.ok and not obs.stale:
             m('<span class="hs-live"><span class="hs-live__dot"></span>Live data · connected</span>')
+        elif obs.ok and obs.stale:
+            # Fresh fetch failed (usually a shared-IP rate limit) but we still
+            # hold a recent real reading — the forecast runs on that, not fallback.
+            m('<span class="hs-badge hs-badge--warning"><span class="hs-dot"></span>'
+              'Live data · cached reading</span>')
+            m('<div class="hs-cap" style="margin:4px 0 2px;">Showing the last real '
+              'reading — a fresh fetch was rate-limited. The forecast is still running '
+              'on live values; it refreshes automatically when the feed frees up.</div>')
         else:
             m('<span class="hs-badge hs-badge--warning"><span class="hs-dot"></span>'
               'Data unavailable — fallback</span>')
@@ -850,7 +863,8 @@ with st.sidebar:
             m('<div class="hs-cap" style="margin:2px 0 2px;">The forecast physics still '
               'runs on safe fallback values — tap “Refresh now” to retry the live feed.</div>')
         _when = obs.fetched_at.strftime("%H:%M:%S") if obs.fetched_at else "—"
-        m(f'<div class="hs-updated">Updated <b>{_when}</b> · {obs.source}</div>')
+        _age = " · cached" if (obs.ok and obs.stale) else ""
+        m(f'<div class="hs-updated">Updated <b>{_when}</b>{_age} · {obs.source}</div>')
 
         m('<div class="hs-rail-h">Current reservoir %</div>')
         ss.res_pct = st.slider("Current reservoir %", 0, 100, value=int(ss.res_pct),

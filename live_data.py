@@ -28,8 +28,10 @@ All numbers here are genuine observations/forecasts — no simulation.
 
 from __future__ import annotations
 
+import copy
 import math
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -53,6 +55,14 @@ except Exception:                       # pragma: no cover - requests ships with
 HTTP_TIMEOUT = float(os.environ.get("HYDRO_HTTP_TIMEOUT", "") or 12.0)
 HTTP_RETRIES = int(os.environ.get("HYDRO_HTTP_RETRIES", "") or 1)
 HTTP_HEADERS = {"User-Agent": "HydroSentry-AI/1.0 (+https://hydrosentry-ai.onrender.com)"}
+
+# Last-good snapshot cache (per basin). Open-Meteo rate-limits by *IP*, and a
+# free hosted tier (Render) shares one outbound IP across many apps, so a fetch
+# can come back "429 Too Many Requests" even though THIS app calls it rarely.
+# When that happens we serve the most recent successful reading (marked
+# ``stale``) so the dashboard keeps running on REAL data instead of dropping to
+# fallback. A snapshot is trusted for LAST_GOOD_TTL seconds (default 1 h).
+LAST_GOOD_TTL = float(os.environ.get("HYDRO_LAST_GOOD_TTL", "") or 3600.0)
 
 
 # ============================================================================
@@ -145,6 +155,7 @@ class LiveObs:
     source: str = "—"
     fetched_at: datetime | None = None
     error: str | None = None
+    stale: bool = False                  # served from last-good cache (see fetch_live)
 
     # --- real current readings ------------------------------------------
     temp_now: float = float("nan")       # °C, 2 m air temperature
@@ -329,13 +340,54 @@ def active_provider() -> DataProvider:
 # ============================================================================
 # Public entry point
 # ============================================================================
+# Per-basin cache of the last SUCCESSFUL snapshot: {basin_key: (monotonic_ts, obs)}.
+# Module-level, so it survives Streamlit's per-interaction reruns (the module is
+# imported once per process, unlike the script, which re-executes every rerun).
+_LAST_GOOD: dict[tuple[float, float], tuple[float, LiveObs]] = {}
+
+
+def _basin_key(b: Basin) -> tuple[float, float]:
+    return (round(b.lat, 4), round(b.lon, 4))
+
+
+def _remember(basin: Basin, obs: LiveObs) -> None:
+    _LAST_GOOD[_basin_key(basin)] = (time.monotonic(), obs)
+
+
+def _recall(basin: Basin) -> LiveObs | None:
+    """Most recent good snapshot for this basin, if still within LAST_GOOD_TTL."""
+    item = _LAST_GOOD.get(_basin_key(basin))
+    if not item:
+        return None
+    ts, obs = item
+    if time.monotonic() - ts > LAST_GOOD_TTL:
+        return None
+    return obs
+
+
+def _is_client_error(e: Exception) -> bool:
+    """True for an HTTP 4xx (esp. 429). Retrying these is pointless and, for a
+    rate-limit, actively harmful — it just adds another call to the same IP."""
+    resp = getattr(e, "response", None)
+    code = getattr(resp, "status_code", None)
+    return isinstance(code, int) and 400 <= code < 500
+
+
 def fetch_live(basin: Basin = UPPER_BHIMA, timeout: float | None = None) -> LiveObs:
     """Fetch a live snapshot. Always returns a LiveObs — never raises.
 
-    Retries a couple of times with a growing timeout: a hosted instance's first
-    outbound call to Open-Meteo can be slow, and a single short attempt would
-    otherwise show a false "data unavailable". Only if every attempt fails do we
-    return ``ok=False`` (with the last error) so the UI can explain what happened.
+    Resilience, in order:
+
+    1. Try the provider. A timeout / connection error is retried once with a
+       larger budget (a hosted instance's first outbound call can be slow).
+    2. An HTTP **4xx is NOT retried** — a 429 "Too Many Requests" (common on a
+       shared hosting IP against Open-Meteo's per-IP rate limit) would only get
+       worse with another call.
+    3. If every attempt fails but we hold a recent good reading for this basin,
+       serve it marked ``stale=True`` (``ok`` stays True) so the forecast keeps
+       running on REAL data rather than dropping to fallback.
+    4. Only with no usable cached reading do we return ``ok=False`` (with the
+       last error) so the UI can explain what happened.
     """
     prov = active_provider()
     budget = HTTP_TIMEOUT if timeout is None else timeout
@@ -344,12 +396,23 @@ def fetch_live(basin: Basin = UPPER_BHIMA, timeout: float | None = None) -> Live
         try:
             obs = prov.fetch(basin, timeout=budget)
             obs.ok = True
+            obs.stale = False
             obs.source = prov.name
             obs.fetched_at = datetime.now()
+            _remember(basin, obs)
             return obs
         except Exception as e:                      # network down, API change, offline…
             last_err = e
+            if _is_client_error(e):                 # 429 / other 4xx — don't hammer it
+                break
             budget = min(budget * 1.6, 30.0)        # give the next attempt more room
+
+    cached = _recall(basin)
+    if cached is not None:
+        stale = copy.copy(cached)                   # keep the original fetched_at / readings
+        stale.stale = True
+        stale.error = str(last_err)[:200] if last_err else None
+        return stale
     return LiveObs(ok=False, source=prov.name,
                    fetched_at=datetime.now(), error=str(last_err)[:200])
 
