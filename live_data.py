@@ -417,6 +417,57 @@ def fetch_live(basin: Basin = UPPER_BHIMA, timeout: float | None = None) -> Live
                    fetched_at=datetime.now(), error=str(last_err)[:200])
 
 
+# ----------------------------------------------------------------------------
+# Throttled fetch — the dashboard's real entry point
+# ----------------------------------------------------------------------------
+# fetch_live() always hits the network. The dashboard reruns constantly (the
+# live panel ticks every ~60 s, plus every widget interaction reruns the whole
+# script), so we throttle how often the network is actually touched — but with
+# DIFFERENT lifetimes for a good vs. a failed attempt:
+#
+#   * A good (or stale-but-real) reading is reused for OK_TTL (default 300 s):
+#     Open-Meteo's current conditions only update every ~15 min, so calling more
+#     often just risks the per-IP rate limit for no fresher data.
+#   * A hard failure (ok=False — e.g. the FIRST fetch on a shared hosting IP
+#     comes back 429 before any good reading is ever cached) is reused for only
+#     FAIL_TTL (default 20 s). This is the key fix: the app RETRIES and
+#     self-heals the moment the shared IP frees up, instead of being frozen on
+#     the error for a full 5 minutes.
+#
+# This lives here (module scope), not behind st.cache_data in app.py, precisely
+# so failures are NOT cached for the same long TTL as successes.
+OK_TTL = float(os.environ.get("HYDRO_LIVE_TTL", "") or 300.0)
+FAIL_TTL = float(os.environ.get("HYDRO_LIVE_FAIL_TTL", "") or 20.0)
+
+_LAST_ATTEMPT: dict[tuple[float, float], tuple[float, LiveObs]] = {}
+
+
+def get_live_cached(basin: Basin = UPPER_BHIMA) -> LiveObs:
+    """``fetch_live`` throttled per basin (see OK_TTL / FAIL_TTL). Never raises."""
+    key = _basin_key(basin)
+    item = _LAST_ATTEMPT.get(key)
+    if item is not None:
+        ts, obs = item
+        ttl = OK_TTL if obs.ok else FAIL_TTL
+        if time.monotonic() - ts < ttl:
+            return obs
+    obs = fetch_live(basin)
+    _LAST_ATTEMPT[key] = (time.monotonic(), obs)
+    return obs
+
+
+def clear_live_cache(basin: Basin | None = None) -> None:
+    """Drop the throttle cache so the next ``get_live_cached`` re-fetches now.
+
+    Called when the user taps "Refresh now" or switches region. Passing a basin
+    clears just that region; passing nothing clears every region.
+    """
+    if basin is None:
+        _LAST_ATTEMPT.clear()
+    else:
+        _LAST_ATTEMPT.pop(_basin_key(basin), None)
+
+
 # ============================================================================
 # tiny numeric helpers
 # ============================================================================

@@ -607,22 +607,23 @@ def _brand_loc(name: str) -> str:
     return f"Monitoring<br><b>{_esc(head)}</b>{sub}"
 
 
-@st.cache_data(ttl=300, show_spinner=False)
 def get_live(lat: float, lon: float, name: str, tz: str):
-    """Real basin snapshot, cached so the network is hit at most once / 5 min.
+    """Real basin snapshot, throttled so the network is hit sparingly.
 
-    A 5-minute TTL keeps outbound calls sparse (Open-Meteo rate-limits by IP,
-    and a shared hosting IP is easy to trip) while staying fresh — the API's
-    current-conditions only update every ~15 min anyway.
+    Delegates to ``live_data.get_live_cached``, which keeps a *good* reading for
+    ~5 min but retries a *failed* one after ~20 s — so a first-fetch 429 on a
+    shared hosting IP self-heals the moment the IP frees up, instead of being
+    cached as an error for minutes. (A plain ``st.cache_data`` here would cache
+    the failure for its whole TTL, which is exactly the bug this avoids.)
 
     Keyed on the region (lat/lon/name/tz) so switching region fetches fresh
-    data instead of serving the previous place from cache.
+    data instead of serving the previous place.
 
-    ``fetch_live`` never raises. On a transient failure it serves the last good
-    reading (``ok=True, stale=True``); only with no cached reading does it
+    ``get_live_cached`` never raises. On a transient failure it serves the last
+    good reading (``ok=True, stale=True``); only with no cached reading does it
     return ``ok=False`` and the UI shows a clean 'data unavailable' fallback.
     """
-    return live_data.fetch_live(live_data.Basin(name, lat, lon, tz))
+    return live_data.get_live_cached(live_data.Basin(name, lat, lon, tz))
 
 
 def _get_live_current():
@@ -640,7 +641,7 @@ def _on_mode_change():
 
 def _on_refresh_live():
     # Force the next fetch to go to the network (the button click reruns the app).
-    get_live.clear()
+    live_data.clear_live_cache()
 
 
 def _set_region(basin):
@@ -649,7 +650,7 @@ def _set_region(basin):
     ss.region_lat = basin.lat
     ss.region_lon = basin.lon
     ss.region_tz = basin.tz
-    get_live.clear()
+    live_data.clear_live_cache(basin)
 
 
 def _on_preset_change():
@@ -1470,7 +1471,8 @@ def render_dashboard():
 
 # run_every drives auto-refresh. In demo mode it advances the scenario clock and
 # stops (None) once paused or the event ends. In live mode it periodically re-runs
-# the panel; the actual network fetch is throttled by get_live's 120 s cache.
+# the panel; the actual network fetch is throttled per basin inside live_data
+# (a good reading held ~5 min, a failed one retried after ~20 s so it self-heals).
 if ss.mode == "live":
     _run_every = LIVE_REFRESH_SECS
 else:
