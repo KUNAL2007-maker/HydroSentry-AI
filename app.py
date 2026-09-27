@@ -117,11 +117,13 @@ html, body, [class*="css"], .stApp, .stMarkdown, p, span, div, li, td, th{
 h1,h2,h3,h4{ font-family:'IBM Plex Sans',system-ui,sans-serif; color:var(--ink); letter-spacing:-.01em; }
 a{ color:var(--teal); text-decoration:none; }
 a:hover{ text-decoration:underline; }
+.stMarkdown img, .hs-panel img{ max-width:100%; height:auto; }
 
 /* strip default streamlit chrome, keep it functional -------------------- */
 [data-testid="stHeader"]{ background:transparent; box-shadow:none; }
 [data-testid="stToolbar"], #MainMenu, [data-testid="stDecoration"], footer{ display:none; }
-.block-container{ max-width:1200px; padding-top:1.1rem; padding-bottom:3rem; }
+.block-container{ max-width:1320px; margin-inline:auto;
+  padding-top:1.1rem; padding-bottom:3rem; padding-inline:clamp(1rem, 4vw, 3rem); }
 
 /* focus visibility (a11y) ------------------------------------------------ */
 a:focus-visible, button:focus-visible, [tabindex]:focus-visible{
@@ -130,7 +132,7 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible{
 
 /* sidebar : the station rail -------------------------------------------- */
 [data-testid="stSidebar"]{ background:var(--surface); border-right:1px solid var(--line); }
-[data-testid="stSidebar"] .block-container{ padding-top:1rem; }
+[data-testid="stSidebar"] .block-container{ padding-top:1rem; padding-inline:1rem; }
 .hs-brand{ padding:2px 2px 14px; border-bottom:1px solid var(--line); margin-bottom:14px; }
 .hs-brand__mark{ display:flex; align-items:center; gap:10px; }
 .hs-brand__logo{
@@ -175,7 +177,7 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible{
 /* command header --------------------------------------------------------- */
 .hs-cmd{ display:flex; align-items:flex-end; justify-content:space-between;
   gap:16px; flex-wrap:wrap; margin:2px 0 14px; }
-.hs-cmd__title{ font-size:26px; font-weight:700; color:var(--brand); line-height:1.15; }
+.hs-cmd__title{ font-size:clamp(20px, 3.4vw, 26px); font-weight:700; color:var(--brand); line-height:1.15; }
 .hs-cmd__sub{ font-size:13.5px; color:var(--muted); margin-top:3px; }
 
 /* badges ----------------------------------------------------------------- */
@@ -208,7 +210,7 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible{
 .hs-hazard__eyebrow b{ font-weight:600; }
 .hs-hazard--flood .hs-hazard__eyebrow b{ color:var(--flood); }
 .hs-hazard--drought .hs-hazard__eyebrow b{ color:var(--drought); }
-.hs-hazard__h{ font-size:21px; font-weight:700; margin:10px 0 6px; }
+.hs-hazard__h{ font-size:clamp(17px, 2.9vw, 21px); font-weight:700; margin:10px 0 6px; }
 .hs-hazard__desc{ font-size:13.5px; color:var(--muted); line-height:1.55; }
 .hs-hazard__mini{ display:flex; gap:22px; margin-top:14px; padding-top:14px; border-top:1px solid var(--line); }
 .hs-hazard__mini .k{ font-size:12px; color:var(--muted); }
@@ -219,7 +221,7 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible{
   background:var(--line); border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; }
 .hs-metric{ background:var(--surface); padding:16px 18px; }
 .hs-metric__label{ font-size:12.5px; color:var(--muted); }
-.hs-metric__value{ font-family:'IBM Plex Mono',monospace; font-size:26px; font-weight:600;
+.hs-metric__value{ font-family:'IBM Plex Mono',monospace; font-size:clamp(19px, 3.6vw, 26px); font-weight:600;
   color:var(--brand); margin-top:6px; line-height:1; }
 .hs-metric__value .u{ font-size:14px; font-weight:500; color:var(--muted); margin-left:4px; }
 .hs-metric__ctx{ font-size:12px; color:var(--muted); margin-top:7px; }
@@ -239,7 +241,7 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible{
 .hs-dir--watch .hs-dir__head{ background:#FCF6E4; }
 .hs-dir__kicker{ font-size:12px; font-weight:600; color:var(--muted); }
 .hs-dir__body{ padding:16px 20px 6px; }
-.hs-dir__title{ font-size:19px; font-weight:700; margin:0 0 8px; color:var(--ink); }
+.hs-dir__title{ font-size:clamp(16px, 2.4vw, 19px); font-weight:700; margin:0 0 8px; color:var(--ink); }
 .hs-dir__situation{ font-size:14px; color:#3a4b57; line-height:1.6; margin:0 0 14px; }
 .hs-dir__alabel{ font-size:12px; font-weight:600; color:var(--muted); margin-bottom:4px; }
 .hs-dir__actions{ margin:0 0 6px; padding-left:20px; }
@@ -268,6 +270,7 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible{
 .hs-sms__sent{ font-size:11.5px; color:var(--muted); margin-top:10px; }
 
 /* tables ----------------------------------------------------------------- */
+.hs-scroll{ overflow-x:auto; -webkit-overflow-scrolling:touch; }
 .hs-table{ width:100%; border-collapse:collapse; font-size:13.5px; }
 .hs-table th{ text-align:left; font-size:11.5px; font-weight:600; color:var(--muted);
   padding:9px 12px; border-bottom:1px solid var(--line); background:#F7FAFB; }
@@ -341,6 +344,15 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible{
 }
 @media (max-width: 560px){
   .hs-readouts{ grid-template-columns:1fr; }
+}
+/* phones: stack Streamlit columns full-width, and let wide tables scroll
+   instead of crushing (real fix for horizontal overflow, not overflow:hidden) */
+@media (max-width: 640px){
+  [data-testid="stHorizontalBlock"]{ flex-wrap:wrap; }
+  [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
+  [data-testid="stHorizontalBlock"] > [data-testid="column"]{
+    flex:1 1 100% !important; width:100% !important; min-width:100% !important; }
+  .hs-scroll .hs-table{ min-width:460px; }
 }
 @media (prefers-reduced-motion: reduce){
   .hs-live__dot{ animation:none; }
@@ -1265,9 +1277,9 @@ def render_dam(s, d, place=None):
                 f'<td class="num">{r["release"]}</td>'
                 f'<td class="num">{r["level"]}</td></tr>')
         m(
-            '<table class="hs-table"><thead><tr>'
+            '<div class="hs-scroll"><table class="hs-table"><thead><tr>'
             '<th>Time (IST)</th><th>Action</th><th>Release</th><th>Reservoir level</th>'
-            '</tr></thead><tbody>' + rows_html + '</tbody></table>'
+            '</tr></thead><tbody>' + rows_html + '</tbody></table></div>'
         )
 
     with col_r:
@@ -1393,9 +1405,9 @@ def render_disaster(s, d, place=None):
                 f'<tr><td>{name}</td><td class="num">{elev}</td>'
                 f'<td class="num">{hh:,}</td><td>{_tbadge(mins)}</td></tr>')
         m(
-            '<table class="hs-table"><thead><tr>'
+            '<div class="hs-scroll"><table class="hs-table"><thead><tr>'
             '<th>Zone</th><th>Elevation</th><th>Households</th><th>Time to impact</th>'
-            '</tr></thead><tbody>' + zone_rows + '</tbody></table>'
+            '</tr></thead><tbody>' + zone_rows + '</tbody></table></div>'
         )
 
     with col_r:
@@ -1430,7 +1442,7 @@ def render_model(s, d):
 
     m(h2("How it compares", "Against today's options"))
     m(
-        '<table class="hs-table"><thead><tr>'
+        '<div class="hs-scroll"><table class="hs-table"><thead><tr>'
         '<th>Approach</th><th>Speed</th><th>Obeys physics</th><th>Safe for decisions</th>'
         '</tr></thead><tbody>'
         '<tr><td><b>HydroSentry-AI</b></td><td class="num">' + f"{s.compute_time_s:.1f} s" + '</td>'
@@ -1441,7 +1453,7 @@ def render_model(s, d):
         '<td class="hs-no">No — invents +25% water at +4°C</td><td class="hs-no">Underpredicts peaks</td></tr>'
         '<tr><td>Generic AI / LLM</td><td class="num">Fast</td>'
         '<td class="hs-no">No</td><td class="hs-no">Can hallucinate advice</td></tr>'
-        '</tbody></table>'
+        '</tbody></table></div>'
     )
 
     st.write("")
@@ -1449,7 +1461,7 @@ def render_model(s, d):
     with col_l:
         m(h2("Validation scorecard", "Measured performance"))
         m(
-            '<table class="hs-table"><thead><tr>'
+            '<div class="hs-scroll"><table class="hs-table"><thead><tr>'
             '<th>Metric</th><th>Score</th><th>What it means</th>'
             '</tr></thead><tbody>'
             '<tr><td>Inference time</td><td class="num">' + f"{s.compute_time_s:.1f} s" + '</td>'
@@ -1464,7 +1476,7 @@ def render_model(s, d):
             '<td>Agreement with NASA SMAP satellite</td></tr>'
             '<tr><td>Errorcastnet gain</td><td class="num">up to 6×</td>'
             '<td>Accuracy over standalone physical models</td></tr>'
-            '</tbody></table>'
+            '</tbody></table></div>'
         )
     with col_r:
         m(h2("Physical honesty test", "Runoff drift under +4°C heat stress"))
