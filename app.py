@@ -28,13 +28,25 @@ Run:
     streamlit run app.py
 """
 
+import copy
 import math
+import os
 import time
 
 import streamlit as st
 
 import hydro_engine as H
 import live_data
+
+try:
+    # Optional browser bridge: lets the VISITOR's browser fetch the live feed
+    # from THEIR IP instead of the shared hosting IP (which Open-Meteo
+    # rate-limits). If it's missing or fails, live mode silently falls back to
+    # the server-side fetch, so this is purely additive.
+    from streamlit_js_eval import streamlit_js_eval
+    HAS_JS_EVAL = True
+except Exception:
+    HAS_JS_EVAL = False
 
 try:
     import plotly.graph_objects as go
@@ -333,6 +345,15 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible{
 @media (prefers-reduced-motion: reduce){
   .hs-live__dot{ animation:none; }
 }
+
+/* browser-live JS bridge (streamlit_js_eval) — invisible worker, no layout gap.
+   Collapse its container to zero height but keep it in the DOM (never display:none,
+   which would stop the fetch). Only rendered in live mode; matches nothing in the demo. */
+.stElementContainer:has(> .stIFrame iframe[title*="streamlit_js_eval"]),
+.stElementContainer:has(> [data-testid="stCustomComponentV1"] iframe[title*="streamlit_js_eval"]),
+div[data-testid="stElementContainer"]:has(iframe[title*="streamlit_js_eval"]){
+  height:0 !important; min-height:0 !important; margin:0 !important; padding:0 !important; }
+iframe[title*="streamlit_js_eval"]{ height:0 !important; min-height:0 !important; border:0 !important; }
 """
 
 st.markdown("<style>" + CSS + "</style>", unsafe_allow_html=True)
@@ -626,9 +647,62 @@ def get_live(lat: float, lon: float, name: str, tz: str):
     return live_data.get_live_cached(live_data.Basin(name, lat, lon, tz))
 
 
+# --- Browser-side live fetch -------------------------------------------------
+# Open-Meteo rate-limits per IP, and a free hosting tier shares one outbound IP
+# across many apps, so the server-side fetch can be 429'd no matter how rarely
+# WE call it. The fix: fetch from the VISITOR's browser (their own IP, which is
+# essentially never rate-limited) via a tiny JS bridge, then run the SAME physics
+# on that data. This is best-effort and additive — if the bridge is disabled,
+# unavailable, blocked, or still pending, _get_live_current() falls back to the
+# self-healing server fetch, so live mode never gets worse than before.
+USE_BROWSER_LIVE = (os.environ.get("HYDRO_BROWSER_LIVE", "1").strip().lower()
+                    not in ("0", "false", "no", "off"))
+BROWSER_OBS_TTL = float(os.environ.get("HYDRO_BROWSER_TTL", "") or 900.0)
+
+
+def _browser_live_pump(basin):
+    """Fetch the live feed from the visitor's browser and stash it per-basin.
+
+    Renders a hidden JS component that fetches Open-Meteo and hands the JSON
+    back to Python. The component only re-evaluates when the JS string changes,
+    so a time-bucket + refresh-nonce cache-buster (Open-Meteo ignores unknown
+    query params) makes it re-fetch each refresh cycle and on 'Refresh now'.
+    Must be called at most once per rerun (single component key).
+    """
+    if not (USE_BROWSER_LIVE and HAS_JS_EVAL):
+        return
+    bucket = int(time.time() // LIVE_REFRESH_SECS)
+    nonce = ss.get("_live_nonce", 0)
+    url = f"{live_data.forecast_url(basin)}&_cb={bucket}.{nonce}"
+    # Always resolve to a plain object: real data, Open-Meteo's {error:true,…},
+    # or a {__hs_err} sentinel on a network/CORS error — never an un-caught reject.
+    js = (f"fetch('{url}').then(function(r){{return r.json();}})"
+          f".catch(function(e){{return {{__hs_err: String(e && e.message || e)}};}})")
+    raw = streamlit_js_eval(js_expressions=js, key="hs_browser_live")
+    obs = live_data.obs_from_open_meteo_json(raw) if isinstance(raw, dict) else None
+    if obs is not None:
+        ss.setdefault("_browser_obs", {})[live_data._basin_key(basin)] = (
+            time.monotonic(), obs)
+
+
 def _get_live_current():
-    """get_live() for the region currently in session state."""
+    """Best available live snapshot for the region in session state.
+
+    Prefers a recent reading fetched by the visitor's browser (see
+    _browser_live_pump); a reading older than one refresh cycle is marked
+    ``stale``. With no usable browser reading it falls back to the server-side
+    fetch (which self-heals on the shared IP)."""
     b = current_basin()
+    item = (ss.get("_browser_obs") or {}).get(live_data._basin_key(b))
+    if item is not None:
+        ts, obs = item
+        age = time.monotonic() - ts
+        if age <= BROWSER_OBS_TTL:
+            if age <= LIVE_REFRESH_SECS * 3:
+                return obs
+            stale = copy.copy(obs)
+            stale.stale = True
+            return stale
     return get_live(b.lat, b.lon, b.name, b.tz)
 
 
@@ -642,6 +716,7 @@ def _on_mode_change():
 def _on_refresh_live():
     # Force the next fetch to go to the network (the button click reruns the app).
     live_data.clear_live_cache()
+    ss["_live_nonce"] = ss.get("_live_nonce", 0) + 1   # re-fetch the browser feed too
 
 
 def _set_region(basin):
@@ -651,6 +726,7 @@ def _set_region(basin):
     ss.region_lon = basin.lon
     ss.region_tz = basin.tz
     live_data.clear_live_cache(basin)
+    ss["_live_nonce"] = ss.get("_live_nonce", 0) + 1   # re-fetch the browser feed too
 
 
 def _on_preset_change():
@@ -1437,6 +1513,7 @@ def render_model(s, d):
 # ---------------------------------------------------------------------------
 def render_dashboard():
     if ss.mode == "live":
+        _browser_live_pump(current_basin())   # refresh the browser feed this cycle
         obs = _get_live_current()
         s = H.simulate(H.forcing_from_live(obs, ss.res_pct / 100.0),
                        H.live_tick_for(obs))

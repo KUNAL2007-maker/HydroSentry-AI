@@ -34,6 +34,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from urllib.parse import urlencode
 
 import numpy as np
 
@@ -212,6 +213,29 @@ def _nearest_index(times: list[str], now: datetime) -> int:
     return best_i
 
 
+def forecast_params(basin: Basin) -> dict:
+    """Open-Meteo query for a basin. Shared by the server-side fetch AND the
+    browser-side fetch (see ``forecast_url``) so both request identical data."""
+    return {
+        "latitude": basin.lat,
+        "longitude": basin.lon,
+        "current": ("temperature_2m,relative_humidity_2m,precipitation,rain,"
+                    "soil_moisture_0_to_1cm"),
+        "hourly": ("precipitation,temperature_2m,soil_moisture_9_to_27cm,"
+                   "et0_fao_evapotranspiration"),
+        "daily": "temperature_2m_max,precipitation_sum,et0_fao_evapotranspiration",
+        "past_days": 2,
+        "forecast_days": 3,
+        "timezone": basin.tz,
+    }
+
+
+def forecast_url(basin: Basin) -> str:
+    """Full Open-Meteo forecast URL for a basin — used by the browser fetch so
+    the request goes out from the VISITOR's IP, not the shared hosting IP."""
+    return OpenMeteoProvider.URL + "?" + urlencode(forecast_params(basin))
+
+
 class OpenMeteoProvider(DataProvider):
     """Free, keyless global weather + hydrology (https://open-meteo.com)."""
 
@@ -221,19 +245,8 @@ class OpenMeteoProvider(DataProvider):
     def fetch(self, basin: Basin, timeout: float = 6.0) -> LiveObs:
         if not HAS_REQUESTS:
             raise RuntimeError("the 'requests' package is not available")
-        params = {
-            "latitude": basin.lat,
-            "longitude": basin.lon,
-            "current": ("temperature_2m,relative_humidity_2m,precipitation,rain,"
-                        "soil_moisture_0_to_1cm"),
-            "hourly": ("precipitation,temperature_2m,soil_moisture_9_to_27cm,"
-                       "et0_fao_evapotranspiration"),
-            "daily": "temperature_2m_max,precipitation_sum,et0_fao_evapotranspiration",
-            "past_days": 2,
-            "forecast_days": 3,
-            "timezone": basin.tz,
-        }
-        r = requests.get(self.URL, params=params, timeout=timeout, headers=HTTP_HEADERS)
+        r = requests.get(self.URL, params=forecast_params(basin),
+                         timeout=timeout, headers=HTTP_HEADERS)
         r.raise_for_status()
         return self._map(r.json())
 
@@ -300,6 +313,24 @@ class OpenMeteoProvider(DataProvider):
             o.sm_days = np.array([0.0])
             o.sm_series = np.array([o.soil_moisture])
         return o
+
+
+def obs_from_open_meteo_json(j: dict) -> "LiveObs | None":
+    """Map a raw Open-Meteo forecast response (as fetched by the browser) into a
+    ``LiveObs``. Returns ``None`` for anything that isn't a real reading — an
+    error payload (Open-Meteo sends ``{"error": true, "reason": …}`` on a 429),
+    a browser-side error sentinel, or a body missing the expected sections — so
+    the caller cleanly ignores it and keeps the last good reading / fallback."""
+    if not isinstance(j, dict) or j.get("error") or j.get("__hs_err"):
+        return None
+    if "hourly" not in j and "current" not in j:
+        return None
+    o = OpenMeteoProvider()._map(j)
+    o.ok = True
+    o.stale = False
+    o.source = OpenMeteoProvider.name
+    o.fetched_at = datetime.now()
+    return o
 
 
 class CustomProvider(DataProvider):

@@ -6,3 +6,4 @@ numpy>=1.24
 pandas>=2.0             # app.py — map marker frames (pydeck)
 pydeck>=0.9             # app.py — interactive basin & evacuation maps (tokenless CARTO)
 requests>=2.31          # live_data.py — real-time Open-Meteo fetch + geocoding (Live mode)
+streamlit-js-eval>=1.0  # app.py — browser-side live fetch (uses the visitor's IP, dodges shared-IP 429s)
