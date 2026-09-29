@@ -1,0 +1,157 @@
+
+```markdown
+# TASK: Fix Real-Time Pipeline, Clock Synchronization, and Architecture Consistency in HydroSentry-AI
+
+You are an expert Python, Streamlit, and Hydrology Software Engineer. 
+
+You need to fix several critical bugs, temporal inconsistencies, and architecture discrepancies in the **HydroSentry-AI** project.
+
+## Context & Repository Info
+- **GitHub Repository**: https://github.com/KUNAL2007-maker/HydroSentry-AI
+- **Production Deployment**: https://hydrosentry-ai.onrender.com
+- **Core Technology Stack**: Python 3.12, Streamlit, Open-Meteo REST API, NumPy, Plotly, Pydeck, Requests.
+
+---
+
+## 1. PRE-REQUISITE: Git Synchronization
+Ensure the local working branch is up to date with `origin/main` before touching code:
+```bash
+git fetch origin
+git pull origin main
+```
+Confirm the working tree has `live_data.py`, `app.py`, and `hydro_engine.py` aligned with commit `d315ea6` or later.
+
+---
+
+## 2. ISSUE #1 (HIGH): Fix Live-Mode Timestamp Contradiction
+### Problem:
+In `hydro_engine.py`, the constant `BASE_TIME = datetime(2026, 9, 21, 12, 0)` is hardcoded.
+When the user switches to **"🛰️ Live data"** mode:
+- The dashboard top header displays the actual current wall-clock time (e.g., `Updated 10:49:00 IST`).
+- However, the **Gate Schedule Table** and the **Overview Directive Activity Feed** use `BASE_TIME` to format times (e.g., `13:30`, `13:12` from 21-Sep-2026).
+- This creates an immediate, visible temporal contradiction on the live website.
+
+### Required Changes:
+1. In `hydro_engine.py`:
+   - Update `simulate(...)`, `gate_schedule(...)`, and `make_directives(...)` to accept an optional parameter: `base_time: datetime | None = None`.
+   - If `base_time` is provided, use it instead of `BASE_TIME`. If `None`, fall back to `BASE_TIME`.
+   - Update all relative time offset calculations (`t_hours`, gate schedule timestamps, directive logs) to build from this `base_time`.
+2. In `app.py`:
+   - When calling `hydro_engine.simulate(...)`, `gate_schedule(...)`, and `make_directives(...)` in **Live data mode**, pass `base_time=obs.fetched_at` (or `datetime.now(ZoneInfo("Asia/Kolkata"))`).
+   - In **Demo mode**, continue passing `base_time=BASE_TIME` (so canned historical scenarios remain reproducible).
+
+---
+
+## 3. ISSUE #2 (HIGH): Default Initial Load to Live Data Mode
+### Problem:
+In `app.py` around line 597:
+```python
+ss.setdefault("mode", "demo")
+```
+First-time visitors to `https://hydrosentry-ai.onrender.com` see canned demo data instead of live Open-Meteo observations unless they manually toggle the sidebar radio.
+
+### Required Changes:
+- Change default session state to `"live"`:
+```python
+ss.setdefault("mode", "live")
+```
+- Ensure that if the initial live fetch is in flight, a clean loading spinner is shown rather than falling back to demo mode without notice. Keep Demo mode easily selectable in the sidebar.
+
+---
+
+## 4. ISSUE #3 (MEDIUM): Harmonize Directive Feed with Flood "Watch" Alert
+### Problem:
+In `hydro_engine.py` (around lines 780–805 in `make_directives`):
+The activity feed requires `s.firo_release > 125` to post an active gate alert. When inflow is in the "Watch" category (`300 <= Q_peak < 600 m³/s`), `firo_release` remains at its baseline of `120 m³/s`.
+As a result:
+- The Flood Hazard Card turns yellow and warns: *"Watch: Flood risk is building"*.
+- But the Directive Activity Feed directly below declares: *"Basin normal: no directives active"*.
+
+### Required Changes:
+In `hydro_engine.py` inside `make_directives`:
+- Add an explicit branch for `s.flood_mode == "watch"`:
+```python
+if s.flood_mode == "watch":
+    feed.append(
+        Directive(
+            role="Dam Operations",
+            timestamp=format_time(base_time + timedelta(minutes=15)),
+            urgency="Advisory",
+            summary=f"Inflow surge expected ({s.inflow_peak:.0f} m³/s). Monitor Khadakwasla radial gates; hold normal release ({s.firo_release:.0f} m³/s) while checking spillway clearance.",
+            action_code="CWC-WATCH-STAGE1",
+        )
+    )
+```
+
+---
+
+## 5. ISSUE #4 (MEDIUM): Dynamic Evacuation Zones for Global/National Basins
+### Problem:
+In Tab 4 ("Disaster Response") in `app.py`, the evacuation sector table hardcodes Pune-specific municipal zones:
+`"Sector 4 — riverfront"`, `"Sector 5 — low road"`, `"Sector 6 — market"`, and `"Route H2 high ground"`.
+When a user switches the basin to **Delhi (Yamuna)**, **Mumbai**, **Kolhapur**, or searches for another city via geocoding, the evacuation plan still tells residents to flee to Pune's Route H2.
+
+### Required Changes:
+In `live_data.py` and `app.py`:
+- Extend `BasinInfo` / `place` dataclass to include localized sectors:
+```python
+sectors: list[dict] = field(default_factory=lambda: [
+    {"name": "Low-lying Riverfront", "zone": "Zone A", "risk": "High"},
+    {"name": "Embankment Roadway", "zone": "Zone B", "risk": "Medium"},
+    {"name": "Municipal Market Area", "zone": "Zone C", "risk": "Low"},
+])
+shelter_phrase: str = "designated district emergency high ground"
+```
+- In Tab 4 (`app.py`), render the table dynamically using `place.sectors` and `place.shelter_phrase` with the current basin name, rather than hardcoding Pune sectors.
+
+---
+
+## 6. ISSUE #5 (HIGH): Measure Real Execution Time & Clarify AI/ML Layer
+### Problem:
+1. `s.compute_time_s` is currently calculated via a synthetic linear equation: `round(82.9 + (s.inflow_peak - BASEFLOW) / 400.0, 1)`.
+2. The UI and presentation describe live PINN and MC-LSTM-PET neural network inference, but the engine executes fast, classical deterministic hydrology (Unit Hydrograph + Euler mass balance + FAO-56).
+3. Evaluators checking the code will notice that no neural network inference actually occurs in production.
+
+### Required Changes:
+1. **Measure Real Execution Time**:
+   In `hydro_engine.simulate()`, measure real execution latency with `time.perf_counter()`:
+   ```python
+   t0 = time.perf_counter()
+   # ... compute hydrology ...
+   s.real_compute_ms = round((time.perf_counter() - t0) * 1000, 2)
+   ```
+   Display the real engine computation time (e.g., `1.4 ms`) on the dashboard as the *"Operational Real-Time Engine Execution"*.
+2. **Transparent Architectural Labeling in Tab 5 & README**:
+   Update Tab 5 ("System Architecture") and `README.md` to clearly distinguish the two layers:
+   - **Layer 1 (Operational Production Engine)**: High-speed deterministic physical hydrology (Gamma Unit Hydrograph convolution, Euler reservoir mass balance, FAO-56 Evaporative Stress Ratio) providing instant, sub-second field forecasts.
+   - **Layer 2 (Research & Neural Surrogates)**: Physics-Informed Neural Network (PINN) and MC-LSTM-PET models evaluated as benchmark surrogates against HEC-RAS 2D (citing the 82.9 s benchmark and research notebooks).
+   This preserves full scientific credibility without misleading evaluators.
+
+---
+
+## 7. ISSUE #6 (LOW): Label Manual Reservoir Slider Clearly
+### Problem:
+Dam reservoir storage % is controlled by a manual Streamlit slider (`st.slider`), but it sits next to live satellite weather cards, which may lead users to believe it is automated IoT dam telemetry.
+
+### Required Changes:
+In `app.py`:
+- Add a clear badge above the slider:
+  `"Interactive Dam Control (Manual Operator Input — IoT Telemetry Pending CWC SCADA Integration)"`.
+- Add a button: `"Set to Seasonal Normal (78%)"` for quick reset.
+
+---
+
+## 8. Verification & Testing Requirements
+After applying all changes:
+1. Run syntax and test checks:
+   ```bash
+   python -m py_compile app.py hydro_engine.py live_data.py
+   python check_canvases.py
+   ```
+2. Run a standalone test script verifying:
+   - Live Mode clock matches `obs.fetched_at` across `make_directives()` and `gate_schedule()`.
+   - Watch-level flood inflow (`328 m³/s`) produces an active advisory in `make_directives()`.
+   - Selecting a non-Pune basin (e.g., Delhi, Kolhapur) displays dynamic sectors in Tab 4.
+   - `simulate()` reports real execution time via `time.perf_counter()`.
+3. Provide a clear Git diff summary and test output.
+```
