@@ -8,6 +8,10 @@ venv/
 # Claude Code — machine-local settings (keep shared settings.json tracked)
 .claude/settings.local.json
 
+# Secrets — API keys never belong in this repository (use env vars on Render)
+.streamlit/secrets.toml
+.env
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

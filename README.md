@@ -11,7 +11,8 @@
 A formal, light-theme interface for **HydroSentry-AI**, a physics-guided flood &
 drought early-warning system for the **Upper Bhima Basin (Pune, Maharashtra)**.
 
-> **Two modes, one console.** A sidebar switch flips between:
+> **Two modes, one console.** The console **opens in live mode** and a sidebar switch
+> flips between:
 > - **🎬 Demo mode** — a self-contained **physics + statistics engine**
 >   ([`hydro_engine.py`](hydro_engine.py)): a gamma unit hydrograph and reservoir
 >   mass balance for the flood side, a soil-moisture bucket with evaporative-stress
@@ -82,10 +83,12 @@ the per-stakeholder directives change with the computed severity.
 
 ## Live data
 
-Flip the sidebar to **🛰️ Live data** and the console runs on **real, current
-observations** for the Upper Bhima Basin (Pune, 18.52°N 73.86°E) instead of a
-scripted scenario. The demo stays one click away — the toggle is pinned at the
-top of the sidebar so you can switch back mid-presentation.
+The console **starts in 🛰️ Live data**, running on **real, current observations**
+for the selected basin (Upper Bhima / Pune, 18.52°N 73.86°E by default) instead of a
+scripted scenario. While the first reading is in flight you get a spinner, and if the
+feed cannot be reached you get an honest *"live data unavailable"* panel with a retry
+— the app never quietly serves the demo as if it were live. The demo stays one click
+away: the toggle is pinned at the top of the sidebar so you can switch mid-presentation.
 
 **What goes live** (the same `BasinState`, so every tab, gauge and directive just
 works):
@@ -133,7 +136,75 @@ Five tabs, each written for a non-technical reader first:
 | **Farmer advisory** | Farmers | Flash-drought warning, evaporative-stress gauge, root-zone moisture trend, the Marathi/English SMS |
 | **Reservoir operations** | Dam operators | FIRO pre-release directive, storage gauge, inflow forecast, live gate schedule |
 | **Disaster response** | Civic teams | Geofenced evacuation directive, affected-zone table, map placeholder |
-| **Model & validation** | Judges / reviewers | How it compares, validation scorecard, the four engines explained |
+| **Model & validation** | Judges / reviewers | The two layers side by side, how it compares, the validation scorecard, and the optional plain-language briefing |
+
+---
+
+## Architecture — two clearly separated layers
+
+HydroSentry-AI is deliberately split in two, and the console never mixes them.
+
+### Layer 1 — Operational Production Engine (what actually runs)
+
+Deterministic physics and statistics in [`hydro_engine.py`](hydro_engine.py), solved
+on the CPU with no model weights, no GPU and no network call:
+
+| Component | Method |
+| --- | --- |
+| Catchment routing | **Gamma unit-hydrograph convolution** of the effective-rainfall pulse |
+| Reservoir | **Explicit Euler mass balance**, `dS/dt = inflow − release`, `dt = 0.1 h`, with the FIRO pre-release rule |
+| Downstream risk | Rating curve vs levee crest → overtopping depth and time-to-impact |
+| Drought | Soil-moisture bucket → **FAO-56 Evaporative Stress Ratio** → percentile climatology → days-to-wilting |
+| Directives | Explicit, auditable rules over the computed state (severity thresholds, FIRO triggers, CWC Stage-1 watch) |
+
+It is fast enough to re-run on every tick, so its execution time is **measured**
+with `time.perf_counter()` and shown on the Overview tab as *Operational Real-Time
+Engine Execution* (single-digit milliseconds), not quoted from a paper.
+
+```
+Live observations (Open-Meteo) → Forcing → Gamma UH convolution
+  → Euler reservoir mass balance → Levee stage & time-to-impact
+  → FAO-56 ESR / ESP → BasinState → Rule-based directives → Dashboard
+```
+
+### Layer 2 — Research & Neural Surrogates (not in the live path)
+
+The research track targets what the closed-form engine deliberately does not
+attempt — full 2D inundation mapping and learned error correction: a **PINN**
+flood-map surrogate, an **MC-LSTM-PET** drought forecaster, **Errorcastnet** bias
+correction, and the **Nugen** plain-language briefing layer.
+
+The headline **~82.9 s** figure belongs here: it is the PINN surrogate's benchmark
+for producing a 2D depth map, against **~2.3 h** for an equivalent HEC-RAS 2D run
+(~100× faster). **It is a research benchmark, not the runtime of the operational
+engine** — nothing in Layer 2 is executed to render the console.
+
+```
+Historical / synthetic events → PINN 2D Saint-Venant surrogate → ~82.9 s depth map
+  → MC-LSTM-PET drought forecaster → Errorcastnet bias correction
+  → Validation vs HEC-RAS 2D & gauges → Research notebooks
+```
+
+Layer 2 components are staged behind the same `simulate()` seam, so each can be
+promoted into Layer 1 once it is validated against gauge records.
+
+### Optional: the Nugen briefing layer
+
+The **Model & validation** tab can ask a small hosted model
+([`nugen_client.py`](nugen_client.py)) to re-word the directives the rule engine has
+already produced into a short duty-officer briefing. It is off by default, runs only
+when you press the button, and never touches the forecast: it is handed the computed
+figures and nothing else, and every number it prints is checked back against the
+computed state before it is shown.
+
+```bash
+export NUGEN_API_KEY="your-key"     # or .streamlit/secrets.toml (gitignored)
+```
+
+On Render, set `NUGEN_API_KEY` under **Environment → Environment Variables**. The key
+is never committed. Quota discipline is built in: a 500-token completion cap, a
+~220-token default, an in-process cache per basin state, and a per-session call
+budget, so the console cannot drain an account by refreshing.
 
 ---
 
@@ -168,6 +239,10 @@ PCCOE HYDRO/
 ├── app.py                 # the dashboard (Streamlit, organised by tab)
 ├── hydro_engine.py        # the physics + statistics engine (demo + live)
 ├── live_data.py           # real-time basin fetch (Open-Meteo, pluggable)
+├── nugen_client.py        # optional plain-language briefing layer (off by default)
+├── verify_demo_golden.py  # regression guard: demo output must stay byte-identical
+├── verify_fixes.py        # acceptance checks: clock, directives, zones, timing
+├── verify_app.py          # Streamlit AppTest smoke test (both modes)
 ├── requirements.txt       # streamlit + plotly + numpy + requests
 ├── render.yaml            # Render Blueprint (one-click cloud deploy)
 ├── README.md              # this file
@@ -175,6 +250,15 @@ PCCOE HYDRO/
 │   └── config.toml        # light theme + brand colours
 └── .claude/
     └── launch.json        # preview config (streamlit on port 8501)
+```
+
+Verify a change before pushing:
+
+```bash
+python -m py_compile app.py hydro_engine.py live_data.py nugen_client.py
+python verify_demo_golden.py   # must print 132/132 states identical
+python verify_fixes.py
+python verify_app.py
 ```
 
 ---

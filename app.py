@@ -32,11 +32,14 @@ import copy
 import math
 import os
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 
 import hydro_engine as H
 import live_data
+import nugen_client
 
 try:
     # Optional browser bridge: lets the VISITOR's browser fetch the live feed
@@ -312,6 +315,22 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible{
 .hs-arch__h{ font-size:15px; font-weight:600; margin:6px 0 6px; }
 .hs-arch__p{ font-size:13px; color:var(--muted); line-height:1.55; }
 
+/* two-layer architecture (model tab) ------------------------------------- */
+.hs-layer{ background:var(--surface); border:1px solid var(--line); border-radius:var(--radius);
+  padding:16px 18px; border-left:4px solid var(--teal); margin-bottom:14px; }
+.hs-layer--research{ border-left-color:#9AA7B0; }
+.hs-layer__tag{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--teal);
+  font-weight:600; letter-spacing:.06em; text-transform:uppercase; }
+.hs-layer--research .hs-layer__tag{ color:var(--muted); }
+.hs-layer__h{ font-size:16px; font-weight:700; margin:6px 0 6px; }
+.hs-layer__p{ font-size:13px; color:var(--muted); line-height:1.6; }
+.hs-flow{ display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-top:12px;
+  font-family:'IBM Plex Mono',monospace; font-size:11.5px; }
+.hs-flow__step{ background:#EEF3F5; border:1px solid var(--line); border-radius:6px;
+  padding:4px 8px; color:var(--brand); white-space:nowrap; }
+.hs-layer--research .hs-flow__step{ background:#F4F6F8; color:var(--muted); }
+.hs-flow__arrow{ color:var(--muted); }
+
 /* drift bars (model tab) ------------------------------------------------- */
 .hs-bar{ margin:10px 0; }
 .hs-bar__lab{ display:flex; justify-content:space-between; font-size:12.5px; margin-bottom:5px; }
@@ -541,9 +560,16 @@ def render_basin_snapshot(s, height=243):
       'hotspot markers are indicative placements around the centre.</div>')
 
 
-def render_evacuation_map(s, tto, at_risk, height=320):
-    """Disaster map: riverside sectors around the basin centre, colored by time
-    to impact. Sector positions are indicative (no per-sector geometry feed)."""
+def _risk_sev(risk) -> str:
+    """Map a zone's risk label ('High'/'Medium'/'Low') to a severity colour."""
+    return {"high": "critical", "medium": "warning", "low": "watch"}.get(
+        str(risk or "").strip().lower(), "safe")
+
+
+def render_evacuation_map(s, tto, at_risk, height=320, place=None):
+    """Disaster map: the Place's riverside zones around the basin centre, coloured
+    by time to impact. Zone positions are indicative (no per-zone geometry feed)."""
+    pl = place or H.DEMO_PLACE
     lat, lon = ss.region_lat, ss.region_lon
     finite = math.isfinite(tto)
 
@@ -556,26 +582,28 @@ def render_evacuation_map(s, tto, at_risk, height=320):
             return "warning"
         return "safe"
 
-    # three riverside sectors, staged along an indicative line near the centre
-    sectors = [
-        ("Sector 4 — riverfront", lat - 0.035, lon - 0.045, tto,
-         round(at_risk * 0.41) if finite else 0),
-        ("Sector 5 — low road", lat - 0.055, lon - 0.020, tto + 15 if finite else float("inf"),
-         round(at_risk * 0.59) if finite else 0),
-        ("Sector 6 — market", lat - 0.070, lon + 0.010, tto + 90 if finite else float("inf"),
-         300 if finite else 0),
-    ]
+    # the Place's zones, staged along an indicative line near the centre
     rows = []
-    for name, sl, so, mins, hh in sectors:
+    for z in pl.sectors:
+        hh = z.get("households")
+        if hh is None:
+            hh = round(at_risk * float(z.get("share", 0.0)))
+        mins = tto + float(z.get("delay", 0)) if finite else float("inf")
         sev = _tsev(mins)
         when = "no impact expected" if not math.isfinite(mins) else (
             "impact imminent" if mins <= 1 else f"impact in ~{int(round(mins))} min")
-        rows.append({"lat": sl, "lon": so, "color": _sev_color(sev),
-                     "radius": 500, "label": f"{name} (indicative)",
-                     "detail": f"{when} · {hh:,} households"})
+        detail = f"{when} · {(hh if finite else 0):,} households"
+        if z.get("elev"):
+            detail += f" · {z['elev']}"
+        rows.append({"lat": lat + float(z.get("dlat", 0.0)),
+                     "lon": lon + float(z.get("dlon", 0.0)),
+                     "color": _sev_color(sev),
+                     "radius": 500,
+                     "label": f"{z['name']} — {z.get('zone', '')} (indicative)".strip(),
+                     "detail": detail})
     # a safe-ground shelter marker
     rows.append({"lat": lat + 0.02, "lon": lon + 0.03, "color": _sev_color("safe"),
-                 "radius": 420, "label": "High-ground shelter (Route H2)",
+                 "radius": 420, "label": pl.shelter_short,
                  "detail": "Safe assembly point"})
     if HAS_PYDECK:
         _deck_map(pd.DataFrame(rows), lat - 0.03, lon - 0.02, zoom=11.5, height=height)
@@ -586,7 +614,7 @@ def render_evacuation_map(s, tto, at_risk, height=320):
       '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--warning)"></span>Stand by</span>'
       '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--safe)"></span>Safe ground</span>'
       '</div>'
-      '<div class="hs-cap" style="margin-top:4px;">Sector positions are indicative placements '
+      '<div class="hs-cap" style="margin-top:4px;">Zone positions are indicative placements '
       'around the basin centre; severity tracks the live time-to-impact.</div>')
 
 
@@ -594,7 +622,10 @@ def render_evacuation_map(s, tto, at_risk, height=320):
 # LIVE SIMULATION STATE  (scenario + playback clock, driven by the engine)
 # ============================================================================
 ss = st.session_state
-ss.setdefault("mode", "demo")           # "demo" (canned scenarios) | "live" (real data)
+# LIVE is the default: this is a real-time system, so a first-time visitor must
+# see real observations, not a scripted story. Demo stays one click away in the
+# sidebar, and the app never silently swaps one for the other.
+ss.setdefault("mode", "live")           # "live" (real data) | "demo" (canned scenarios)
 ss.setdefault("scenario", "dipole")     # start on the headline dipole crisis
 ss.setdefault("tick", 0)                # simulation step, 0 .. TICKS_MAX
 ss.setdefault("live", True)             # auto-advance the clock?
@@ -716,6 +747,44 @@ def _get_live_current():
             stale.stale = True
             return stale
     return get_live(b.lat, b.lon, b.name, b.tz)
+
+
+def _live_base_time(obs) -> datetime:
+    """The single clock origin for LIVE mode: the real observation time.
+
+    Every timestamp the engine generates in live mode (header clock, gate
+    schedule, directive feed) is derived from this one value, so they can never
+    disagree — and ``hydro_engine.BASE_TIME`` (the 2026 demo story clock) is
+    never involved.
+
+    ``LiveObs.fetched_at`` is naive, stamped with ``datetime.now()`` in the
+    server's own zone (UTC on Render), so ``astimezone`` converts it to true
+    basin-local time. With no observation time we fall back to *now* in the
+    basin's zone. The result is always timezone-aware, and only ever has a
+    timedelta added or is formatted — never compared to a naive datetime.
+    """
+    try:
+        tz = ZoneInfo(ss.get("region_tz") or "Asia/Kolkata")
+    except Exception:
+        tz = ZoneInfo("Asia/Kolkata")
+    fetched = getattr(obs, "fetched_at", None) if obs is not None else None
+    if fetched is None:
+        return datetime.now(tz)
+    try:
+        return fetched.astimezone(tz)
+    except Exception:
+        return datetime.now(tz)
+
+
+def _set_seasonal_normal():
+    """Reset the manual reservoir reading to the seasonal-normal storage.
+
+    Runs as an on_click callback, i.e. *before* the slider is instantiated on the
+    next rerun, so assigning its key here is the supported way to move a widget
+    and never triggers the "default value but also set via Session State"
+    warning.
+    """
+    ss.res_pct = int(round(H.RES_START_FRAC * 100))    # 78 %
 
 
 def _on_mode_change():
@@ -951,13 +1020,20 @@ with st.sidebar:
                   'word-break:break-word;">Reason: ' + _esc(obs.error) + '</div>')
             m('<div class="hs-cap" style="margin:2px 0 2px;">The forecast physics still '
               'runs on safe fallback values — tap “Refresh now” to retry the live feed.</div>')
-        _when = obs.fetched_at.strftime("%H:%M:%S") if obs.fetched_at else "—"
+        # basin-local observation time, the same base the engine clock uses
+        _when = _live_base_time(obs).strftime("%H:%M:%S") if obs.fetched_at else "—"
         _age = " · cached" if (obs.ok and obs.stale) else ""
         m(f'<div class="hs-updated">Updated <b>{_when}</b>{_age} · {obs.source}</div>')
 
-        m('<div class="hs-rail-h">Current reservoir %</div>')
-        ss.res_pct = st.slider("Current reservoir %", 0, 100, value=int(ss.res_pct),
-                               label_visibility="collapsed")
+        m('<div class="hs-rail-h">Interactive Dam Control</div>')
+        m('<div class="hs-cap" style="margin:-4px 0 6px;">Manual operator input — '
+          'IoT telemetry pending CWC SCADA integration.</div>')
+        # key="res_pct" binds the widget straight to session state, so the
+        # "Seasonal Normal" callback below can set it without a value=/key clash.
+        st.slider("Current reservoir % (manual operator input)", 0, 100,
+                  key="res_pct", label_visibility="collapsed")
+        st.button("Set to Seasonal Normal (78%)", key="res_pct_normal_btn",
+                  on_click=_set_seasonal_normal, use_container_width=True)
         _rshort = _esc(H.place_from_region(ss.region_name).short)
         m('<div class="hs-cap" style="margin:-4px 0 4px;">'
           f'{_rshort} has no free public reservoir-level feed — set the current storage '
@@ -1031,7 +1107,11 @@ with st.sidebar:
 def render_header(s, obs=None):
     if ss.mode == "live":
         ok = bool(obs and obs.ok)
-        when = obs.fetched_at.strftime("%H:%M:%S") if (obs and obs.fetched_at) else "—"
+        # Read the clock from the SAME base_time the engine used, converted to the
+        # basin's zone — so the header, the gate schedule and the directive feed
+        # can never show contradictory times.
+        when = (s.base_time.strftime("%H:%M:%S") if getattr(s, "base_time", None)
+                else "—")
         prov = obs.source if obs else "—"
         if ok:
             pill = ('<span class="hs-live"><span class="hs-live__dot"></span>'
@@ -1124,7 +1204,8 @@ def render_overview(s, d, place=None):
     m(h2("Performance at a glance", "How the system is doing right now"))
     m(
         '<div class="hs-readouts">'
-        + metric("Flood map compute time", f"{s.compute_time_s:.1f}", "s", "100× faster than HEC-RAS 2D")
+        + metric("Operational Real-Time Engine Execution", f"{s.real_compute_ms:.2f}", "ms",
+                 "Measured this update — deterministic physics")
         + metric("Model accuracy (KGE)", f"{s.kge:.2f}", "", "Gold-standard hydrology score")
         + metric("Drought lead time", f"{s.lead_time_days}", "days", "Before visible crop wilting")
         + metric("Soil-moisture match (R)", f"{s.r_smap:.2f}", "", "Against NASA SMAP satellite")
@@ -1348,6 +1429,7 @@ def render_disaster(s, d, place=None):
     di = d["disaster"]
     tto = s.time_to_overtop_min
     at_risk = s.households_at_risk
+    pl = place or H.DEMO_PLACE          # zones/shelter labels come from the Place
 
     def _sev_for(mins):
         if not math.isfinite(mins):
@@ -1387,32 +1469,31 @@ def render_disaster(s, d, place=None):
         ))
         st.write("")
         m(h2("Affected zones", "Ordered by time to impact"))
-        if math.isfinite(tto):
-            zones = [
-                ("Sector 4 — riverfront", "538 m", round(at_risk * 0.41), tto),
-                ("Sector 5 — low road", "540 m", round(at_risk * 0.59), tto + 15),
-                ("Sector 6 — market", "544 m", 300, tto + 90),
-            ]
-        else:
-            zones = [
-                ("Sector 4 — riverfront", "538 m", 0, float("inf")),
-                ("Sector 5 — low road", "540 m", 0, float("inf")),
-                ("Sector 6 — market", "544 m", 0, float("inf")),
-            ]
+        # Zones come from place.sectors, so every basin shows its own geography
+        # instead of the Pune-only "Sector 4/5/6" labels.
+        finite = math.isfinite(tto)
         zone_rows = ""
-        for name, elev, hh, mins in zones:
+        for z in pl.sectors:
+            hh = z.get("households")
+            if hh is None:
+                hh = round(at_risk * float(z.get("share", 0.0)))
+            mins = tto + float(z.get("delay", 0)) if finite else float("inf")
             zone_rows += (
-                f'<tr><td>{name}</td><td class="num">{elev}</td>'
-                f'<td class="num">{hh:,}</td><td>{_tbadge(mins)}</td></tr>')
+                f'<tr><td>{_esc(z["name"])}</td>'
+                f'<td class="num">{_esc(z.get("zone", "—"))}</td>'
+                f'<td class="num">{(hh if finite else 0):,}</td>'
+                f'<td>{badge(z.get("risk", "—"), _risk_sev(z.get("risk")))}</td>'
+                f'<td>{_tbadge(mins)}</td></tr>')
         m(
             '<div class="hs-scroll"><table class="hs-table"><thead><tr>'
-            '<th>Zone</th><th>Elevation</th><th>Households</th><th>Time to impact</th>'
+            '<th>Area</th><th>Zone</th><th>Households</th><th>Risk</th>'
+            '<th>Time to impact</th>'
             '</tr></thead><tbody>' + zone_rows + '</tbody></table></div>'
         )
 
     with col_r:
         m(h2("Evacuation map", "Geofenced risk zones"))
-        render_evacuation_map(s, tto, at_risk, height=320)
+        render_evacuation_map(s, tto, at_risk, height=320, place=pl)
         st.write("")
         if not math.isfinite(tto):
             ti_val, ti_unit = "—", ""
@@ -1420,12 +1501,15 @@ def render_disaster(s, d, place=None):
             ti_val, ti_unit = f"{int(round(tto))}", "min"
         else:
             ti_val, ti_unit = f"{tto/60:.1f}", "hr"
+        _first_zones = ", ".join(_esc(z["zone"]) for z in pl.sectors[:2]) or "—"
         m(
             '<div class="hs-readouts" style="grid-template-columns:1fr 1fr;">'
-            + metric("Time to impact", ti_val, ti_unit, "Sectors 4 &amp; 5")
+            + metric("Time to impact", ti_val, ti_unit, _first_zones)
             + metric("River above levee", f"{s.overtop_depth:.1f}", "m", "Forecast crest height")
-            + metric("Households at risk", f"{at_risk:,}", "", "Below 542 m elevation")
-            + metric("Shelters ready", "4", "", "On Route H2 high ground")
+            + metric("Households at risk", f"{at_risk:,}", "",
+                     _esc(pl.risk_elev_phrase).capitalize())
+            + metric("Shelters ready", f"{len(pl.sectors) + 1}", "",
+                     _esc(pl.shelter_short))
             + '</div>'
         )
 
@@ -1433,25 +1517,96 @@ def render_disaster(s, d, place=None):
 # ---------------------------------------------------------------------------
 # TAB 5 — MODEL & VALIDATION  (for judges / technical reviewers)
 # ---------------------------------------------------------------------------
+def _flow(steps) -> str:
+    """Render a pipeline as monospace step chips joined by arrows."""
+    parts = []
+    for i, step in enumerate(steps):
+        if i:
+            parts.append('<span class="hs-flow__arrow">→</span>')
+        parts.append(f'<span class="hs-flow__step">{step}</span>')
+    return '<div class="hs-flow">' + "".join(parts) + '</div>'
+
+
 def render_model(s, d):
     m(h2("Model &amp; validation", "How HydroSentry-AI works, and why it can be trusted"))
-    m(note("HydroSentry-AI keeps the speed of AI but obeys the laws of physics, so it never "
-           "invents water that isn't there. Below is how it compares to the alternatives.",
-           label="The idea in one line"))
+    m(note("HydroSentry-AI runs in two clearly separated layers. <b>Layer 1</b> is the "
+           "deterministic physics engine that produced every number on this screen, in "
+           "milliseconds. <b>Layer 2</b> is the research track — neural surrogates and "
+           "published benchmarks that are <b>not</b> in the live decision path. Nothing "
+           "below mixes the two.",
+           label="Read this first"))
     st.write("")
 
+    # ---- Layer 1 — what actually ran ------------------------------------
+    m(h2("Layer 1 — Operational Production Engine", "This is what computed the live dashboard"))
+    m(
+        '<div class="hs-layer">'
+        '<div class="hs-layer__tag">Layer 1 · in the live decision path · running now</div>'
+        '<div class="hs-layer__h">Deterministic physics &amp; statistics — '
+        f'{s.real_compute_ms:.2f} ms measured this update</div>'
+        '<div class="hs-layer__p">Closed-form hydrology, solved on the CPU with no model '
+        'weights, no GPU and no network call: a <b>Gamma unit-hydrograph convolution</b> for '
+        'catchment routing, an <b>explicit Euler reservoir mass balance</b> '
+        '(dS/dt = inflow − release, dt = 0.1 h) for storage, level and FIRO pre-release, a '
+        'rating/levee-crest comparison for downstream stage and time-to-overtopping, and a '
+        'soil-moisture bucket with the <b>FAO-56 Evaporative Stress Ratio</b> and its '
+        'percentile climatology for the drought side. Being deterministic, it returns the '
+        'same answer for the same inputs every time — and it is fast enough to re-run on '
+        'every tick, which is why the execution time above is measured with '
+        '<code>time.perf_counter()</code> rather than quoted from a paper.</div>'
+        + _flow(["Live observations (Open-Meteo)", "Forcing", "Gamma UH convolution",
+                 "Euler reservoir mass balance", "Levee stage &amp; time-to-impact",
+                 "FAO-56 ESR / ESP", "BasinState", "Rule-based directives", "Dashboard"])
+        + '<div class="hs-cap" style="margin-top:10px;">LIVE OPERATIONAL PATH — every value '
+        'in the Overview, Farmer, Reservoir and Disaster tabs comes from this chain.</div>'
+        '</div>'
+    )
+
+    st.write("")
+    m(h2("Layer 2 — Research &amp; Neural Surrogates", "Published / in development — not in the live path"))
+    m(
+        '<div class="hs-layer hs-layer--research">'
+        '<div class="hs-layer__tag">Layer 2 · research track · not used for the live readings</div>'
+        '<div class="hs-layer__h">Neural surrogates and the HEC-RAS 2D benchmark</div>'
+        '<div class="hs-layer__p">The research layer targets the problems the closed-form '
+        'engine deliberately does not attempt — full 2D inundation mapping and learned '
+        'forecast-error correction. Its headline figure is a <b>benchmark</b>: the PINN '
+        f'flood-map surrogate produces a 2D depth map in <b>~{H.BENCHMARK_COMPUTE_S:.1f} s</b> '
+        'against <b>~2.3 h</b> for an equivalent HEC-RAS 2D run (~100× faster). That number '
+        'describes the research surrogate, <b>not</b> the runtime of the operational engine '
+        'above — the live engine finishes in milliseconds because it solves a much smaller, '
+        'closed-form problem. These components are staged behind the same '
+        '<code>simulate()</code> seam so they can be promoted into Layer 1 once each is '
+        'validated against gauge records.</div>'
+        + _flow(["Historical / synthetic events", "PINN 2D Saint-Venant surrogate",
+                 f"~{H.BENCHMARK_COMPUTE_S:.1f} s depth map", "MC-LSTM-PET drought forecaster",
+                 "Errorcastnet bias correction", "Validation vs HEC-RAS 2D &amp; gauges",
+                 "Research notebooks"])
+        + '<div class="hs-cap" style="margin-top:10px;">RESEARCH / BENCHMARK PATH — offline, '
+        'run against historical events; none of it is executed to render this console.</div>'
+        '</div>'
+    )
+
+    st.write("")
     m(h2("How it compares", "Against today's options"))
     m(
         '<div class="hs-scroll"><table class="hs-table"><thead><tr>'
-        '<th>Approach</th><th>Speed</th><th>Obeys physics</th><th>Safe for decisions</th>'
+        '<th>Approach</th><th>Layer</th><th>Speed</th><th>Obeys physics</th>'
+        '<th>Safe for decisions</th>'
         '</tr></thead><tbody>'
-        '<tr><td><b>HydroSentry-AI</b></td><td class="num">' + f"{s.compute_time_s:.1f} s" + '</td>'
-        '<td class="hs-yes">Yes — built in</td><td class="hs-yes">Yes — certified directives</td></tr>'
-        '<tr><td>HEC-RAS 2D (physics solver)</td><td class="num">2.3 hr</td>'
+        '<tr><td><b>HydroSentry-AI operational engine</b></td><td>1 — production</td>'
+        '<td class="num">' + f"{s.real_compute_ms:.2f} ms" + '</td>'
+        '<td class="hs-yes">Yes — solved, not learned</td>'
+        '<td class="hs-yes">Yes — certified directives</td></tr>'
+        '<tr><td>HydroSentry-AI PINN flood-map surrogate</td><td>2 — research</td>'
+        '<td class="num">' + f"~{H.BENCHMARK_COMPUTE_S:.1f} s" + ' <span class="hs-cap">(benchmark)</span></td>'
+        '<td class="hs-yes">Physics-constrained loss</td>'
+        '<td class="hs-no">Not yet in the live path</td></tr>'
+        '<tr><td>HEC-RAS 2D (reference solver)</td><td>Baseline</td><td class="num">~2.3 hr</td>'
         '<td class="hs-yes">Yes</td><td class="hs-no">Too slow for flash events</td></tr>'
-        '<tr><td>Black-box AI</td><td class="num">Fast</td>'
+        '<tr><td>Black-box AI</td><td>—</td><td class="num">Fast</td>'
         '<td class="hs-no">No — invents +25% water at +4°C</td><td class="hs-no">Underpredicts peaks</td></tr>'
-        '<tr><td>Generic AI / LLM</td><td class="num">Fast</td>'
+        '<tr><td>Generic AI / LLM</td><td>—</td><td class="num">Fast</td>'
         '<td class="hs-no">No</td><td class="hs-no">Can hallucinate advice</td></tr>'
         '</tbody></table></div>'
     )
@@ -1464,8 +1619,12 @@ def render_model(s, d):
             '<div class="hs-scroll"><table class="hs-table"><thead><tr>'
             '<th>Metric</th><th>Score</th><th>What it means</th>'
             '</tr></thead><tbody>'
-            '<tr><td>Inference time</td><td class="num">' + f"{s.compute_time_s:.1f} s" + '</td>'
-            '<td>100× faster than HEC-RAS 2D</td></tr>'
+            '<tr><td>Operational engine execution</td>'
+            '<td class="num">' + f"{s.real_compute_ms:.2f} ms" + '</td>'
+            '<td>Layer 1 — measured on this update with time.perf_counter()</td></tr>'
+            '<tr><td>PINN flood-map surrogate</td>'
+            '<td class="num">' + f"~{H.BENCHMARK_COMPUTE_S:.1f} s" + '</td>'
+            '<td>Layer 2 benchmark — ~100× faster than HEC-RAS 2D (~2.3 h)</td></tr>'
             '<tr><td>KGE accuracy</td><td class="num">' + f"{s.kge:.2f}" + '</td>'
             '<td>Gold-standard hydrology score (1.0 is perfect)</td></tr>'
             '<tr><td>Drought lead time</td><td class="num">' + f"{s.lead_time_days} days" + '</td>'
@@ -1475,9 +1634,12 @@ def render_model(s, d):
             '<tr><td>Soil-moisture match (R)</td><td class="num">' + f"{s.r_smap:.2f}" + '</td>'
             '<td>Agreement with NASA SMAP satellite</td></tr>'
             '<tr><td>Errorcastnet gain</td><td class="num">up to 6×</td>'
-            '<td>Accuracy over standalone physical models</td></tr>'
+            '<td>Layer 2 target — accuracy over standalone physical models</td></tr>'
             '</tbody></table></div>'
         )
+        m('<div class="hs-cap" style="margin-top:6px;">KGE, POD, R and the lead time are '
+          'reference validation figures for the modelling approach, carried as constants; '
+          'the execution time is the only number measured live.</div>')
     with col_r:
         m(h2("Physical honesty test", "Runoff drift under +4°C heat stress"))
         m(
@@ -1497,45 +1659,271 @@ def render_model(s, d):
         )
 
     st.write("")
-    m(h2("What is under the hood", "Four engines, in plain terms"))
+    m(h2("Component roles", "Which layer each engine belongs to"))
     m(
         '<div class="hs-arch">'
-        '<div class="hs-arch__card"><div class="hs-arch__tag">Flood engine</div>'
+        '<div class="hs-arch__card"><div class="hs-arch__tag">Layer 1 · production · flood</div>'
+        '<div class="hs-arch__h">Gamma unit hydrograph + reservoir mass balance</div>'
+        '<div class="hs-arch__p">Routes the rainfall pulse into a reservoir inflow hydrograph and '
+        'integrates storage forward explicitly, so inflow, release, level and the gate schedule '
+        'are guaranteed to agree. This is what runs live, in milliseconds.</div></div>'
+        '<div class="hs-arch__card"><div class="hs-arch__tag">Layer 1 · production · drought</div>'
+        '<div class="hs-arch__h">FAO-56 Evaporative Stress Ratio + percentile climatology</div>'
+        '<div class="hs-arch__p">Tracks the ratio of what the soil can give up against what the hot '
+        'air demands (ET / PET) through a bucket with drainage, then places today on the historical '
+        'stress distribution to give the percentile and days-to-wilting.</div></div>'
+        '<div class="hs-arch__card"><div class="hs-arch__tag">Layer 2 · research · flood mapping</div>'
         '<div class="hs-arch__h">PINN — physics-informed neural network</div>'
-        '<div class="hs-arch__p">Solves the 2D Saint-Venant water equations directly inside '
-        'the network, so it maps flood depth in 83 seconds without breaking the laws of fluid flow.</div></div>'
-        '<div class="hs-arch__card"><div class="hs-arch__tag">Drought engine</div>'
-        '<div class="hs-arch__h">MC-LSTM-PET — mass-conserving forecaster</div>'
-        '<div class="hs-arch__p">Tracks the ratio of what the soil can give up versus what the '
-        'hot air demands (ET / PET), with a thermodynamic ceiling that stops it inventing water.</div></div>'
-        '<div class="hs-arch__card"><div class="hs-arch__tag">Error model</div>'
-        '<div class="hs-arch__h">Errorcastnet — learns its own mistakes</div>'
-        '<div class="hs-arch__p">Separates fixable, systematic bias from unavoidable randomness, '
-        'so the model corrects what it can and never overfits the rest.</div></div>'
-        '<div class="hs-arch__card"><div class="hs-arch__tag">Directive layer</div>'
-        '<div class="hs-arch__h">Nugen — certified plain-language advice</div>'
-        '<div class="hs-arch__p">Aligns an open model to CWC dam manuals and IMD protocols, turning '
-        'raw numbers into legally-compliant instructions — no GPU needed at inference.</div></div>'
+        '<div class="hs-arch__p">Targets full 2D inundation depth by putting the Saint-Venant '
+        f'residual in the loss. Benchmarked at ~{H.BENCHMARK_COMPUTE_S:.1f} s per map versus ~2.3 h '
+        'for HEC-RAS 2D. Not executed by this console.</div></div>'
+        '<div class="hs-arch__card"><div class="hs-arch__tag">Layer 2 · research · forecasting</div>'
+        '<div class="hs-arch__h">MC-LSTM-PET + Errorcastnet</div>'
+        '<div class="hs-arch__p">A mass-conserving recurrent drought forecaster with a '
+        'thermodynamic ceiling, plus an error model that separates systematic bias from '
+        'irreducible noise. In development against gauge records.</div></div>'
+        '<div class="hs-arch__card"><div class="hs-arch__tag">Layer 1 · production · directives</div>'
+        '<div class="hs-arch__h">Deterministic rule engine (CWC / IMD / SOP)</div>'
+        '<div class="hs-arch__p">Every directive you see is generated by explicit, auditable rules '
+        'over the computed state — severity thresholds, FIRO triggers and the Stage-1 watch '
+        'advisory — so the wording can always be traced back to a number and a manual.</div></div>'
+        '<div class="hs-arch__card"><div class="hs-arch__tag">Layer 2 · optional · language</div>'
+        '<div class="hs-arch__h">Nugen — plain-language briefing layer</div>'
+        '<div class="hs-arch__p">An optional hosted LLM call that <b>re-words</b> the directives the '
+        'rule engine already produced into a short operator briefing. It is given the computed '
+        'figures and nothing else, every number it prints is checked back against the computed '
+        'state, it is off unless a key is configured, and the console works identically without '
+        'it. See the briefing panel below.</div></div>'
         '</div>'
     )
+
+    st.write("")
+    render_nugen_panel(s, d)
+
+
+# ---------------------------------------------------------------------------
+# TAB 5 — optional Nugen briefing layer (Layer 2, language only)
+# ---------------------------------------------------------------------------
+def _nugen_key() -> str:
+    """Resolve the Nugen API key from Streamlit secrets, then the environment.
+
+    Never hard-coded: this repository is public, so the key belongs in a Render
+    environment variable (``NUGEN_API_KEY``) or a gitignored
+    ``.streamlit/secrets.toml``. Missing is a normal, supported state.
+    """
+    try:
+        val = str(st.secrets.get("NUGEN_API_KEY", "") or "").strip()
+        if val:
+            return val
+    except Exception:            # no secrets file at all — perfectly fine
+        pass
+    return nugen_client.default_api_key()
+
+
+def _nugen_sig(s) -> str:
+    """Identity of the update a briefing was generated for (staleness check)."""
+    return (f"{ss.get('mode')}|{ss.get('region_name', '')}|{s.scenario}|{s.tick}|"
+            f"{s.flood_sev}|{s.drought_sev}|{s.inflow_peak:.0f}|{s.reservoir_pct:.0f}")
+
+
+def _nugen_html(text: str) -> str:
+    """Escaped HTML for a model reply: bullet lines become a list."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    bullets = [ln.lstrip("-*•").strip() for ln in lines
+               if ln[:1] in ("-", "*", "•")]
+    if len(bullets) >= 2:
+        return ('<ul class="hs-dir__actions" style="margin:0;">'
+                + "".join(f"<li>{_esc(b)}</li>" for b in bullets) + "</ul>")
+    return "".join(f'<p style="margin:0 0 6px;">{_esc(ln)}</p>' for ln in lines)
+
+
+def render_nugen_panel(s, d):
+    """The optional hosted-LLM briefing: re-wording only, never a forecast.
+
+    Deliberately click-to-run. The account allows 500 tokens per completion, so
+    nothing here fires on a page load or on the 60-second live refresh — the
+    quota is spent only when a reviewer asks for a briefing, and repeat asks for
+    the same update are served from the client's cache.
+    """
+    m(h2("Plain-language briefing (optional)",
+         "Layer 2 · language only — Nugen hosted inference"))
+    m(note("This panel asks a small hosted language model to <b>re-word</b> the "
+           "directives the rule engine has already produced into a short duty-officer "
+           "briefing. It is given the computed numbers and instructed to use nothing "
+           "else; every figure it prints is then checked back against the computed "
+           "state and anything unsupported is flagged below. It cannot reach the "
+           "physics engine, the directive cards in the other tabs remain the "
+           "authoritative wording, and the console behaves identically when this layer "
+           "is switched off. It runs only when you press the button.",
+           label="What this is, and is not"))
+    st.write("")
+
+    key = _nugen_key()
+    basin_label = (ss.region_name if ss.mode == "live"
+                   else "Upper Bhima Basin (Pune, Maharashtra)")
+    sig = _nugen_sig(s)
+
+    if not key:
+        m('<div class="hs-layer hs-layer--research">'
+          '<div class="hs-layer__tag">Layer 2 · optional · not configured</div>'
+          '<div class="hs-layer__h">Briefing layer is off — no API key configured</div>'
+          '<div class="hs-layer__p">This is the normal state for a public deployment: the '
+          'key is never committed to the repository. To switch the layer on, set '
+          '<code>NUGEN_API_KEY</code> as an environment variable (on Render: '
+          '<i>Environment → Environment Variables</i>) or put it in a gitignored '
+          '<code>.streamlit/secrets.toml</code>, then restart the app. Every forecast, '
+          'gauge and directive on this dashboard is produced without it.</div>'
+          f'<div class="hs-cap" style="margin-top:10px;">Model '
+          f'<code>{nugen_client.MODEL}</code> · '
+          f'{nugen_client.MAX_TOKENS_LIMIT}-token completion cap.</div>'
+          '</div>')
+        return
+
+    left, right = st.columns([2, 1])
+    with left:
+        go = st.button("Generate operator briefing", key="nugen_go",
+                       use_container_width=True)
+    with right:
+        st.markdown(
+            f'<div class="hs-cap" style="padding-top:8px;">Model '
+            f'<code>{nugen_client.MODEL}</code> · cap '
+            f'{nugen_client.DEFAULT_MAX_TOKENS}/{nugen_client.MAX_TOKENS_LIMIT} tokens · '
+            f'{nugen_client.budget_left()} calls left this session.</div>',
+            unsafe_allow_html=True)
+
+    if go:
+        with st.spinner("Re-wording the directives…"):
+            res = nugen_client.brief(s, d, place_name=basin_label, api_key=key)
+        ss["_nugen"] = {
+            "sig": sig, "ok": res.ok, "text": res.text, "error": res.error,
+            "cached": res.cached, "tokens": res.tokens_out,
+            "unsupported": list(res.unsupported),
+            "clock": getattr(s, "clock", ""),
+        }
+
+    data = ss.get("_nugen")
+    if not data:
+        m('<div class="hs-cap" style="margin-top:8px;">No briefing requested yet. '
+          'Nothing is sent until you press the button, so the token budget is spent '
+          'only on demand.</div>')
+        return
+
+    if not data.get("ok"):
+        m(note(_esc(data.get("error") or "The briefing layer did not return text."),
+               label="Briefing unavailable"))
+        m('<div class="hs-cap" style="margin-top:6px;">The dashboard above is '
+          'unaffected — the briefing layer is presentational.</div>')
+        return
+
+    stale = data.get("sig") != sig
+    tag = ("Layer 2 · language layer · re-worded from the directives above"
+           if not stale else
+           "Layer 2 · generated for an earlier update — press again to refresh")
+    bad = data.get("unsupported") or []
+    if bad:
+        check = ('<span style="color:var(--warning)">Figure check: '
+                 + _esc(", ".join(str(b) for b in bad[:6]))
+                 + ' did not come from the computed state — trust the directive '
+                   'cards, not this wording.</span>')
+    else:
+        check = ('<span style="color:var(--safe)">Figure check: every number in '
+                 'this briefing appears in the computed state.</span>')
+    m('<div class="hs-layer hs-layer--research">'
+      f'<div class="hs-layer__tag">{tag}</div>'
+      f'<div class="hs-layer__h">Duty-officer briefing — {_esc(basin_label)}</div>'
+      f'<div class="hs-layer__p">{_nugen_html(data.get("text", ""))}</div>'
+      f'<div class="hs-cap" style="margin-top:10px;">{check}</div>'
+      f'<div class="hs-cap" style="margin-top:4px;">Generated for the '
+      f'{_esc(data.get("clock") or "current")} update'
+      + (" · served from cache (no tokens spent)" if data.get("cached")
+         else (f" · {data['tokens']} completion tokens"
+               if data.get("tokens") else ""))
+      + ' · wording only: nothing here is computed by this layer.</div>'
+      '</div>')
+
+    with st.expander("What was sent to the briefing layer"):
+        st.code(nugen_client.preview(s, d, basin_label), language="text")
+        st.caption("Only the computed state and the approved directives are sent, "
+                   "after a fixed instruction and one worked example. No credentials, "
+                   "no user input and no raw observations leave the app.")
 
 
 # ---------------------------------------------------------------------------
 # Live dashboard — header + tabs re-render together on every tick
 # ---------------------------------------------------------------------------
+def _render_live_unreachable():
+    """Honest panel for 'live mode selected, but no reading yet'.
+
+    Shown INSTEAD of the dashboard, so we never dress a fallback state up as
+    real observations. The user retries, or chooses demo mode explicitly — the
+    app never switches for them.
+    """
+    m('<div class="hs-cmd"><div>'
+      '<div class="hs-cmd__title">Basin Command Console</div>'
+      f'<div class="hs-cmd__sub">Live · <b>{_esc(ss.region_name)}</b> &nbsp;·&nbsp; '
+      'waiting for the first real-time reading.</div></div>'
+      '<span class="hs-badge hs-badge--warning"><span class="hs-dot"></span>'
+      'Live data unavailable</span></div>')
+    st.write("")
+    m(note("The real-time weather feed could not be reached, so there is nothing "
+           "measured to show yet. No numbers are displayed rather than estimated "
+           "ones. This usually clears within a minute — the feed is retried "
+           f"automatically every {LIVE_REFRESH_SECS} seconds.",
+           label="Live feed unreachable"))
+    st.write("")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("↻ Retry now", key="live_retry_now", use_container_width=True):
+            _on_refresh_live()
+            _safe_rerun()
+    with c2:
+        if st.button("🎬 Use demo mode instead", key="live_fallback_demo",
+                     use_container_width=True):
+            ss.mode = "demo"
+            ss.tick = 0
+            ss.last_tick_time = time.monotonic()
+            _safe_rerun()
+
+
+def _safe_rerun():
+    """Rerun the whole app (not just this fragment) across Streamlit versions."""
+    try:
+        st.rerun(scope="app")
+    except TypeError:            # Streamlit < 1.37 has no scope argument
+        st.rerun()
+
+
 def render_dashboard():
     if ss.mode == "live":
-        _browser_live_pump(current_basin())   # refresh the browser feed this cycle
-        obs = _get_live_current()
+        # A visible loading state while the very first reading is in flight —
+        # the panel must never look "ready" before real data has arrived.
+        first_load = not ss.get("_live_ever_ok")
+        if first_load:
+            with st.spinner(f"Connecting to the live feed for {ss.region_name}…"):
+                _browser_live_pump(current_basin())
+                obs = _get_live_current()
+        else:
+            _browser_live_pump(current_basin())   # refresh the browser feed this cycle
+            obs = _get_live_current()
+
+        if obs is not None and obs.ok:
+            ss["_live_ever_ok"] = True
+        elif first_load:
+            _render_live_unreachable()
+            return
+
+        # LIVE clock origin = the real observation time (never BASE_TIME).
+        base_time = _live_base_time(obs)
         s = H.simulate(H.forcing_from_live(obs, ss.res_pct / 100.0),
-                       H.live_tick_for(obs))
+                       H.live_tick_for(obs), base_time=base_time)
         place = H.place_from_region(ss.region_name)
     else:
         _advance_if_due()
         obs = None
+        base_time = None                 # demo keeps the deterministic BASE_TIME
         s = H.simulate(ss.scenario, ss.tick)
         place = None                     # engine uses the scripted DEMO_PLACE
-    d = H.make_directives(s, place)
+    d = H.make_directives(s, place, base_time=base_time)
 
     render_header(s, obs)
 

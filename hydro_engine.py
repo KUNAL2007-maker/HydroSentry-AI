@@ -34,6 +34,7 @@ and close to the project's narrative figures.
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -78,7 +79,17 @@ SCENARIO_ORDER = ["normal", "flash_flood", "flash_drought", "dipole"]
 TICKS_MAX = 32                 # a full scenario runs over 32 update ticks
 FLOOD_HORIZON_H = 8.0          # flood dynamics span 8 hours
 DROUGHT_HORIZON_D = 14.0       # drought dynamics span 14 days
-BASE_TIME = datetime(2026, 9, 21, 12, 0)   # sim clock origin (IST)
+
+# Sim clock origin for DEMO mode. The canned scenarios are a scripted historical
+# story, so their clock is fixed and deterministic. LIVE mode must NOT use this —
+# it passes the real observation time in as ``base_time`` (see _clock_base).
+BASE_TIME = datetime(2026, 9, 21, 12, 0)   # demo sim clock origin (IST)
+
+# Published RESEARCH benchmark for the PINN flood-map surrogate (vs ~2.3 h for a
+# HEC-RAS 2D run). This is a *benchmark* figure from the research layer, NOT the
+# runtime of the operational engine below — that is measured per call into
+# ``BasinState.real_compute_ms`` with time.perf_counter().
+BENCHMARK_COMPUTE_S = 82.9
 
 
 # ============================================================================
@@ -112,6 +123,11 @@ class BasinState:
     flood_hours: float
     drought_day: float
     clock: str
+
+    # clock origin this state was computed against: BASE_TIME in demo mode, the
+    # real observation timestamp in live mode. gate_schedule() / make_directives()
+    # fall back to it so every generated timestamp shares one base.
+    base_time: datetime | None = None
 
     # flood / reservoir
     rain_now: float = 0.0
@@ -154,8 +170,17 @@ class BasinState:
     flood_sev: str = "safe"
     drought_sev: str = "safe"
 
+    # ---- timing -----------------------------------------------------------
+    # real_compute_ms: MEASURED wall-clock time of the operational hydrology
+    # computation in this very simulate() call (time.perf_counter). This is the
+    # number the dashboard shows as the production engine's execution time.
+    real_compute_ms: float = 0.0
+    # compute_time_s: the RESEARCH benchmark for the PINN flood-map surrogate
+    # (~82.9 s vs ~2.3 h for HEC-RAS 2D). Kept for the benchmark comparison
+    # table only — it is NOT this engine's runtime. See BENCHMARK_COMPUTE_S.
+    compute_time_s: float = BENCHMARK_COMPUTE_S
+
     # model performance (validation constants)
-    compute_time_s: float = 82.9
     kge: float = 0.93
     pod: float = 0.57
     r_smap: float = 0.89
@@ -167,6 +192,27 @@ class BasinState:
 # ============================================================================
 def _norm_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _clock_base(base_time: "datetime | None" = None,
+                s: "BasinState | None" = None) -> datetime:
+    """The clock origin every generated timestamp must be derived from.
+
+    Resolution order:
+      1. an explicit ``base_time`` argument  (LIVE mode: the observation time)
+      2. ``s.base_time`` stamped by ``simulate()``  (so a caller that forgets to
+         pass base_time still cannot silently fall back to the historical clock)
+      3. ``BASE_TIME``  (DEMO mode: the fixed, deterministic scripted clock)
+
+    The returned value may be timezone-aware (live) or naive (demo); it is only
+    ever added to a timedelta and formatted, never compared against the other
+    kind, so the two modes cannot raise an offset-naive/aware TypeError.
+    """
+    if base_time is not None:
+        return base_time
+    if s is not None and getattr(s, "base_time", None) is not None:
+        return s.base_time
+    return BASE_TIME
 
 
 def _trapz(y: np.ndarray, x: np.ndarray) -> float:
@@ -312,10 +358,32 @@ class Place:
     agri_belt: str       # farmland label, e.g. "Nashik agricultural belt"
     reservoir: str       # reservoir/dam label, e.g. "Nashik reservoir"
     dam_name: str        # feed dam label (no "Reservoir" suffix), e.g. "Khadakwasla"
-    sectors: str         # riverside zones (plain), e.g. "Sectors 4 and 5"
+    sectors_text: str    # riverside zones as prose, e.g. "Sectors 4 and 5"
     sectors_amp: str     # riverside zones (HTML '&amp;' variant) for meta/feed
-    shelter_phrase: str  # full phrase: where to move residents
     road_action: str     # full action sentence: closing the riverside road
+
+    # Evacuation geography. ``sectors`` drives the Disaster-response tab's zone
+    # table and evacuation map, so no basin's zones are hard-coded in the UI.
+    # Each entry: name / zone / risk (required) plus the layout hints the tab
+    # needs — elev (elevation label), share (fraction of at-risk households),
+    # delay (minutes added to time-to-impact), dlat/dlon (indicative offset from
+    # the basin centre for the map marker).
+    sectors: list[dict] = field(default_factory=lambda: [
+        {"name": "Low-lying Riverfront", "zone": "Zone A", "risk": "High",
+         "elev": "538 m", "share": 0.41, "delay": 0, "dlat": -0.035, "dlon": -0.045},
+        {"name": "Embankment Roadway", "zone": "Zone B", "risk": "Medium",
+         "elev": "540 m", "share": 0.59, "delay": 15, "dlat": -0.055, "dlon": -0.020},
+        {"name": "Municipal Market Area", "zone": "Zone C", "risk": "Low",
+         "elev": "544 m", "share": 0.0, "delay": 90, "dlat": -0.070, "dlon": 0.010,
+         "households": 300},
+    ])
+    # where residents are moved to, as a sentence fragment ("Move residents to …")
+    shelter_phrase: str = "designated district emergency high ground"
+    # compact label for the "Shelters ready" readout context
+    shelter_short: str = "District designated high ground"
+    # how the at-risk area is described; basins without a surveyed levee datum
+    # get a zone-based phrase instead of an invented elevation
+    risk_elev_phrase: str = "in the mapped low-lying flood zone"
 
 
 # Exact scripted labels for the demo story (Upper Bhima / Pune). Every fragment
@@ -326,10 +394,21 @@ DEMO_PLACE = Place(
     agri_belt="Junnar–Daund belt",
     reservoir="Khadakwasla Reservoir",
     dam_name="Khadakwasla",
-    sectors="Sectors 4 and 5",
+    sectors_text="Sectors 4 and 5",
     sectors_amp="Sectors 4 &amp; 5",
-    shelter_phrase="the high-ground shelters on Route H2",
     road_action="Close the riverside road at the Sector 4 junction to incoming traffic.",
+    sectors=[
+        {"name": "Sector 4 — riverfront", "zone": "Sector 4", "risk": "High",
+         "elev": "538 m", "share": 0.41, "delay": 0, "dlat": -0.035, "dlon": -0.045},
+        {"name": "Sector 5 — low road", "zone": "Sector 5", "risk": "Medium",
+         "elev": "540 m", "share": 0.59, "delay": 15, "dlat": -0.055, "dlon": -0.020},
+        {"name": "Sector 6 — market", "zone": "Sector 6", "risk": "Low",
+         "elev": "544 m", "share": 0.0, "delay": 90, "dlat": -0.070, "dlon": 0.010,
+         "households": 300},
+    ],
+    shelter_phrase="the high-ground shelters on Route H2",
+    shelter_short="On Route H2 high ground",
+    risk_elev_phrase="below 542 m elevation",
 )
 
 
@@ -340,6 +419,10 @@ def place_from_region(region_name: str) -> Place:
     "Upper Bhima Basin — Pune" or a geocoded label like
     "Nashik, Maharashtra, India"). The short name is the first comma- or
     dash-separated token.
+
+    Everything place-specific — including the evacuation zones and the shelter
+    phrase — is derived here, so a non-Pune basin never inherits Pune's
+    "Sector 4/5/6" or "Route H2" labels.
     """
     if not region_name:
         return DEMO_PLACE
@@ -350,10 +433,12 @@ def place_from_region(region_name: str) -> Place:
         agri_belt=f"{short} agricultural belt",
         reservoir=f"{short} reservoir",
         dam_name=short,
-        sectors="riverside sectors",
-        sectors_amp="riverside sectors",
-        shelter_phrase="the nearest designated high-ground shelters",
+        sectors_text=f"the low-lying {short} riverside zones",
+        sectors_amp=f"the low-lying {short} riverside zones",
         road_action="Close low-lying riverside access roads to incoming traffic.",
+        # Place() supplies the generic Zone A/B/C geography via its field default
+        shelter_phrase=f"the {short} district designated emergency high ground",
+        shelter_short=f"{short} district high ground",
     )
 
 
@@ -374,7 +459,18 @@ def live_tick_for(obs) -> int:
 # ============================================================================
 # Core simulation
 # ============================================================================
-def simulate(spec, tick: int) -> BasinState:
+def simulate(spec, tick: int, base_time: datetime | None = None) -> BasinState:
+    """Compute a full basin state.
+
+    ``base_time`` is the clock origin every timestamp in this state (and in the
+    ``gate_schedule`` / ``make_directives`` derived from it) is measured from.
+    LIVE mode passes the real observation time; DEMO mode leaves it ``None`` so
+    the deterministic ``BASE_TIME`` story clock is used.
+    """
+    # measured wall-clock cost of the operational hydrology below (see
+    # s.real_compute_ms). Start the timer before any physics runs.
+    _t0 = time.perf_counter()
+
     # forcing comes from a canned scenario (demo) or real observations (live)
     forcing = spec if isinstance(spec, Forcing) else forcing_from_scenario(spec)
     scenario_key = spec if isinstance(spec, str) else forcing.source
@@ -384,10 +480,14 @@ def simulate(spec, tick: int) -> BasinState:
 
     flood_h = frac * FLOOD_HORIZON_H
     drought_d = frac * DROUGHT_HORIZON_D
-    clock = (BASE_TIME + timedelta(hours=flood_h)).strftime("%d %b %Y, %H:%M IST")
+    t_base = _clock_base(base_time)
+    # Demo's BASE_TIME is naive and scripted in IST; a live base_time carries the
+    # basin's own zone, so label the clock with that zone instead of assuming IST.
+    tz_label = (t_base.strftime("%Z") or "IST") if t_base.tzinfo is not None else "IST"
+    clock = (t_base + timedelta(hours=flood_h)).strftime(f"%d %b %Y, %H:%M {tz_label}")
 
     s = BasinState(scenario=scenario_key, tick=tick, flood_hours=flood_h,
-                   drought_day=drought_d, clock=clock)
+                   drought_day=drought_d, clock=clock, base_time=t_base)
     s.start_frac = (forcing.reservoir_start_frac
                     if forcing.reservoir_start_frac is not None else RES_START_FRAC)
 
@@ -531,22 +631,32 @@ def simulate(spec, tick: int) -> BasinState:
     else:
         s.drought_sev = "safe"
 
-    # a realistic compute time that nudges with event complexity
-    s.compute_time_s = round(82.9 + (s.inflow_peak - BASEFLOW) / 400.0, 1)
+    # ---- measured execution time ----------------------------------------
+    # The operational engine's REAL runtime: wall-clock time actually spent in
+    # the physics above, in milliseconds. No synthetic value, no sleep.
+    s.real_compute_ms = round((time.perf_counter() - _t0) * 1000, 2)
+    # compute_time_s stays the published RESEARCH benchmark for the PINN
+    # flood-map surrogate (see BENCHMARK_COMPUTE_S) — it is NOT this runtime.
+    s.compute_time_s = BENCHMARK_COMPUTE_S
     return s
 
 
 # ============================================================================
 # Reservoir gate schedule (forward plan, integrated with the same mass balance)
 # ============================================================================
-def gate_schedule(s: BasinState) -> list:
+def gate_schedule(s: BasinState, base_time: datetime | None = None) -> list:
     """Forward-looking gate schedule for the operations table.
 
     Sampled at fixed event times; the release column comes from the same
     release rule the mass balance uses, and the level column is the storage
     integrated forward with that rule — so release, level and action agree.
     Each row is tagged done / now / planned relative to the live clock.
+
+    Row clock times are derived from ``base_time`` (LIVE: the observation time),
+    falling back to the ``base_time`` stamped on ``s`` by ``simulate()``, so the
+    gate clock can never disagree with the header clock.
     """
+    t_base = _clock_base(base_time, s)
     target_peak = s.target_peak
     flood_mode = s.flood_mode
 
@@ -597,7 +707,7 @@ def gate_schedule(s: BasinState) -> list:
         else:
             status = "planned"
         rows.append({
-            "time": (BASE_TIME + timedelta(hours=te)).strftime("%H:%M"),
+            "time": (t_base + timedelta(hours=te)).strftime("%H:%M"),
             "action": action,
             "release": f"{rel:.0f} m³/s",
             "level": f"{lvl:.1f} m",
@@ -622,12 +732,17 @@ def _fmt_time(minutes: float) -> str:
     return f"~{int(round(minutes))} minutes"
 
 
-def make_directives(s: BasinState, place: "Place | None" = None) -> dict:
+def make_directives(s: BasinState, place: "Place | None" = None,
+                    base_time: datetime | None = None) -> dict:
     """Turn the computed state into plain-language, per-stakeholder directives.
 
     ``place`` supplies the location labels used in the advisory text. When it is
     None (demo mode) the scripted Upper Bhima labels are used, so the demo story
     is unchanged; Live mode passes a ``Place`` derived from the chosen region.
+
+    ``base_time`` is the clock origin for the activity-feed timestamps (LIVE: the
+    observation time), falling back to the ``base_time`` stamped on ``s`` by
+    ``simulate()`` and finally to the demo ``BASE_TIME``.
     """
     if place is None:
         place = DEMO_PLACE
@@ -698,6 +813,38 @@ def make_directives(s: BasinState, place: "Place | None" = None) -> dict:
             "meta": f"Inflow surge expected in {s.inflow_peak_in_h:.1f} hours — {place.reservoir}",
             "cert": "Certified against CWC operation manual",
         }
+    elif s.flood_sev == "watch":
+        # Inflow is elevated (Watch band) but still below the pre-release
+        # trigger, so the reservoir plan is "hold and stage". Without this
+        # branch the basin reported "no directives active" while the flood
+        # panel showed Watch — the two contradicted each other.
+        # Only this branch carries the extra CWC advisory fields; readers must
+        # use .get() so the other branches (and the frozen demo output) are
+        # unaffected.
+        dam = {
+            "severity": "watch",
+            "role": "Dam Operations",
+            "urgency": "Advisory",
+            "action_code": "CWC-WATCH-STAGE1",
+            "title": f"Stage-1 watch — hold normal release, ready {place.dam_name} gates",
+            "situation": (
+                f"An inflow surge is building toward {s.inflow_peak:.0f} m³/s "
+                f"(peak in about {s.inflow_peak_in_h:.1f} hours) — above normal but still "
+                f"within the safe channel capacity of {SAFE_CHANNEL:.0f} m³/s. "
+                f"{place.reservoir} holds its normal release for now, with the radial gates "
+                f"and the spillway readied so a pre-release can start without delay if the "
+                f"forecast climbs."),
+            "actions": [
+                f"Hold the normal release of {BASE_RELEASE:.0f} m³/s — no pre-release yet.",
+                f"Place the {place.dam_name} radial gates on Stage-1 standby and confirm "
+                f"hoist power and manual override.",
+                "Clear the spillway channel and confirm downstream gauges are reporting.",
+                "Re-run the inflow forecast each hour; escalate to FIRO pre-release if the "
+                f"peak forecast exceeds {SAFE_CHANNEL:.0f} m³/s.",
+            ],
+            "meta": f"Stage-1 watch — {place.reservoir}",
+            "cert": "Certified against CWC operation manual",
+        }
     else:
         dam = {
             "severity": "safe",
@@ -716,18 +863,18 @@ def make_directives(s: BasinState, place: "Place | None" = None) -> dict:
     # ---- disaster team --------------------------------------------------
     if math.isfinite(s.time_to_overtop_min) and s.overtop_depth > 0.1:
         imminent = s.time_to_overtop_min <= 1
-        title = (f"Evacuate low-lying {place.sectors} now — levee overtopping"
+        title = (f"Evacuate low-lying {place.sectors_text} now — levee overtopping"
                  if imminent else
-                 f"Evacuate low-lying {place.sectors} within {int(round(s.time_to_overtop_min))} minutes")
+                 f"Evacuate low-lying {place.sectors_text} within {int(round(s.time_to_overtop_min))} minutes")
         disaster = {
             "severity": "critical" if s.time_to_overtop_min <= 100 else "warning",
             "title": title,
             "situation": (
                 f"The river will rise about {s.overtop_depth:.1f} m above the levee crest at "
-                f"{place.sectors} ({_fmt_time(s.time_to_overtop_min)}). "
-                f"Areas below 542 m elevation are at risk of inundation."),
+                f"{place.sectors_text} ({_fmt_time(s.time_to_overtop_min)}). "
+                f"Areas {place.risk_elev_phrase} are at risk of inundation."),
             "actions": [
-                "Begin geofenced evacuation for all zones <b>below 542 m elevation</b>.",
+                f"Begin geofenced evacuation for all zones <b>{place.risk_elev_phrase}</b>.",
                 f"Move residents to {place.shelter_phrase}.",
                 place.road_action,
             ],
@@ -772,7 +919,7 @@ def make_directives(s: BasinState, place: "Place | None" = None) -> dict:
 
     # ---- overview activity feed ----------------------------------------
     feed = []
-    base = BASE_TIME + timedelta(hours=s.flood_hours)
+    base = _clock_base(base_time, s) + timedelta(hours=s.flood_hours)
     if disaster["severity"] != "safe":
         feed.append((base.strftime("%H:%M"), disaster["severity"],
                      f"<b>{place.sectors_amp}:</b> prepare geofenced evacuation, "
@@ -783,6 +930,12 @@ def make_directives(s: BasinState, place: "Place | None" = None) -> dict:
     elif s.firo_release > BASE_RELEASE + 5 and s.past_peak:
         feed.append(((base - timedelta(minutes=18)).strftime("%H:%M"), "watch",
                      f"<b>{place.dam_name} dam:</b> surge crest absorbed — holding safe-channel release."))
+    elif dam.get("action_code") == "CWC-WATCH-STAGE1":
+        # Stage-1 watch advisory: issued 15 minutes after the clock base, so an
+        # elevated inflow never shows up as "no directives active".
+        feed.append(((base + timedelta(minutes=15)).strftime("%H:%M"), "watch",
+                     f"<b>{place.dam_name} dam:</b> Stage-1 watch — inflow surge to "
+                     f"{s.inflow_peak:.0f} m³/s, radial gates on standby, holding normal release."))
     if farmer["severity"] in ("warning", "critical"):
         feed.append(((base - timedelta(minutes=32)).strftime("%H:%M"), farmer["severity"],
                      f"<b>Farmers, {place.short}:</b> start pre-dawn drip irrigation to protect roots."))
