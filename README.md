@@ -159,7 +159,10 @@ on the CPU with no model weights, no GPU and no network call:
 
 It is fast enough to re-run on every tick, so its execution time is **measured**
 with `time.perf_counter()` and shown on the Overview tab as *Operational Real-Time
-Engine Execution* (single-digit milliseconds), not quoted from a paper.
+Engine Execution* — a real figure for that update, not one quoted from a paper.
+On a current laptop a full `simulate()` call lands around **0.4 ms**; a shared
+cloud CPU is slower, so treat the displayed number as the measurement and this
+one as indicative.
 
 ```
 Live observations (Open-Meteo) → Forcing → Gamma UH convolution
