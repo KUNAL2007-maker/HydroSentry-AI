@@ -18,6 +18,9 @@ Two things are checked here that cannot be checked any other way:
   fallback state is never dressed up as real observations.
 * **Test I** — the optional Nugen briefing layer is off without a key, armed
   with one, and spends no quota on a plain page render either way.
+* **Test J** — the cloud case: the server's own feed call is refused while the
+  visitor's in-browser fetch is still in flight, so the first render must say
+  "fetching", and a miss that outlives that grace must still say "unreachable".
 
 The live feed is stubbed with a fixed observation so the run is offline and
 deterministic; the browser-side JS fetch is disabled through the app's own
@@ -371,8 +374,53 @@ def test_i() -> None:
         os.environ.pop("NUGEN_API_KEY", None)
 
 
+def test_j() -> None:
+    """The cloud-host case: the SERVER's fetch fails, the browser's is in flight.
+
+    On Render the app's own Open-Meteo call is routinely refused on the shared
+    datacentre IP while the visitor's in-browser fetch succeeds a moment later.
+    The first render must therefore say it is still *fetching* — claiming the
+    feed is unreachable while a fetch is in flight makes a working console look
+    broken — and a miss that survives a refresh cycle must still be reported
+    honestly, with the retry.
+    """
+    os.environ["HYDRO_BROWSER_LIVE"] = "1"          # arm the in-browser bridge
+    try:
+        install_dead_stub()
+        at = AppTest.from_file(APP, default_timeout=TIMEOUT)
+        at.run()
+
+        check("J1 the first render with the bridge armed does not raise",
+              not at.exception, exc_text(at))
+        text = page_text(at)
+        check("J2 it says the reading is still being fetched",
+              "Fetching the first reading" in text)
+        check("J3 it does not yet claim the feed is unreachable",
+              "Live feed unreachable" not in text)
+        check("J4 it is explicit that nothing stands in for the missing reading",
+              "no estimated numbers stand in for it" in text)
+        leaked = [p for p in ("Performance at a glance",
+                              "Operational Real-Time Engine Execution",
+                              "Real-time observations") if p in text]
+        check("J5 no dashboard is rendered while connecting", not leaked,
+              f"leaked {leaked}")
+
+        # …and a miss that outlives the grace is reported as a failure.
+        at.run()
+        text2 = page_text(at)
+        check("J6 a second miss is reported as unreachable",
+              "Live feed unreachable" in text2)
+        check("J7 the retry is offered then",
+              "button:live_retry_now" in widget_keys(at), str(sorted(widget_keys(at))))
+        check("J8 the reason from the feed is surfaced for diagnosis",
+              "simulated network failure" in text2)
+    finally:
+        os.environ["HYDRO_BROWSER_LIVE"] = "0"
+        install_stub()
+
+
 def main() -> int:
-    for fn in (test_e, test_f, test_h, test_i):
+    for fn in (test_e, test_f, test_h, test_i, test_j):
         try:
             fn()
         except Exception as exc:                        # a raise is a failure

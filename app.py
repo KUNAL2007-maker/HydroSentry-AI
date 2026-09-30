@@ -798,6 +798,7 @@ def _on_refresh_live():
     # Force the next fetch to go to the network (the button click reruns the app).
     live_data.clear_live_cache()
     ss["_live_nonce"] = ss.get("_live_nonce", 0) + 1   # re-fetch the browser feed too
+    ss["_live_tries"] = 0             # an explicit retry starts the grace again
 
 
 def _set_region(basin):
@@ -808,6 +809,7 @@ def _set_region(basin):
     ss.region_tz = basin.tz
     live_data.clear_live_cache(basin)
     ss["_live_nonce"] = ss.get("_live_nonce", 0) + 1   # re-fetch the browser feed too
+    ss["_live_tries"] = 0             # a new region gets its own first-read grace
 
 
 def _on_preset_change():
@@ -1851,24 +1853,44 @@ def render_nugen_panel(s, d):
 # ---------------------------------------------------------------------------
 # Live dashboard — header + tabs re-render together on every tick
 # ---------------------------------------------------------------------------
-def _render_live_unreachable():
+def _render_live_unreachable(obs=None, connecting: bool = False):
     """Honest panel for 'live mode selected, but no reading yet'.
 
     Shown INSTEAD of the dashboard, so we never dress a fallback state up as
     real observations. The user retries, or chooses demo mode explicitly — the
     app never switches for them.
+
+    Two shades of the same honesty. On a cloud host the *server's* own
+    Open-Meteo call is routinely 429'd (shared datacentre IP) while the
+    visitor's in-browser fetch succeeds a beat later — so on the very first
+    render, with that fetch still in flight, the truthful statement is "still
+    connecting", not "unreachable". Either way no number is shown.
     """
+    if connecting:
+        badge, headline = "Connecting to the live feed", "waiting for the first real-time reading."
+    else:
+        badge, headline = "Live data unavailable", "waiting for the first real-time reading."
     m('<div class="hs-cmd"><div>'
       '<div class="hs-cmd__title">Basin Command Console</div>'
       f'<div class="hs-cmd__sub">Live · <b>{_esc(ss.region_name)}</b> &nbsp;·&nbsp; '
-      'waiting for the first real-time reading.</div></div>'
+      f'{headline}</div></div>'
       '<span class="hs-badge hs-badge--warning"><span class="hs-dot"></span>'
-      'Live data unavailable</span></div>')
+      f'{badge}</span></div>')
     st.write("")
+
+    if connecting:
+        m(note("The first reading is being fetched in your browser, so it comes "
+               "from your own connection rather than this server's. Nothing is "
+               "shown until it arrives — no estimated numbers stand in for it.",
+               label="Fetching the first reading"))
+        return
+
+    why = (getattr(obs, "error", None) or "").strip() if obs is not None else ""
     m(note("The real-time weather feed could not be reached, so there is nothing "
            "measured to show yet. No numbers are displayed rather than estimated "
            "ones. This usually clears within a minute — the feed is retried "
-           f"automatically every {LIVE_REFRESH_SECS} seconds.",
+           f"automatically every {LIVE_REFRESH_SECS} seconds."
+           + (f"<br><span class='hs-cap'>Reason: {_esc(why)}</span>" if why else ""),
            label="Live feed unreachable"))
     st.write("")
     c1, c2 = st.columns(2)
@@ -1908,8 +1930,18 @@ def render_dashboard():
 
         if obs is not None and obs.ok:
             ss["_live_ever_ok"] = True
+            ss["_live_tries"] = 0
         elif first_load:
-            _render_live_unreachable()
+            # A cloud host's own Open-Meteo call is routinely 429'd on its shared
+            # datacentre IP, while the visitor's in-browser fetch — still in
+            # flight on this very first render — succeeds a beat later. So the
+            # first miss is reported as "connecting", and only a miss that
+            # survives a refresh cycle is reported as "unreachable". Both
+            # withhold every number; the difference is only which is true.
+            tries = ss.get("_live_tries", 0) + 1
+            ss["_live_tries"] = tries
+            _render_live_unreachable(
+                obs, connecting=(tries <= 1 and USE_BROWSER_LIVE and HAS_JS_EVAL))
             return
 
         # LIVE clock origin = the real observation time (never BASE_TIME).
