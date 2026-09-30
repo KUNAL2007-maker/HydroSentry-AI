@@ -13,6 +13,11 @@ Two things are checked here that cannot be checked any other way:
   and the "Set to Seasonal Normal (78%)" button moves it without tripping
   Streamlit's "widget created with a default value but also set via Session
   State" error.
+* **Test H** — the other half of live-by-default: when the feed cannot be
+  reached, the dashboard is *replaced* by an honest panel with a retry, so a
+  fallback state is never dressed up as real observations.
+* **Test I** — the optional Nugen briefing layer is off without a key, armed
+  with one, and spends no quota on a plain page render either way.
 
 The live feed is stubbed with a fixed observation so the run is offline and
 deterministic; the browser-side JS fetch is disabled through the app's own
@@ -36,6 +41,7 @@ import numpy as np
 
 import hydro_engine as H
 import live_data
+import nugen_client
 
 try:
     from streamlit.testing.v1 import AppTest
@@ -75,11 +81,33 @@ def install_stub() -> None:
     live_data.fetch_live = lambda basin=live_data.UPPER_BHIMA: stub_obs(basin)
 
 
+def dead_obs(basin: live_data.Basin = live_data.UPPER_BHIMA) -> live_data.LiveObs:
+    """What ``live_data`` hands back when the network is unreachable."""
+    return live_data.LiveObs(ok=False, source="verify_app stub", fetched_at=None,
+                             error="verify_app: simulated network failure")
+
+
+def install_dead_stub() -> None:
+    live_data.get_live_cached = lambda basin=live_data.UPPER_BHIMA: dead_obs(basin)
+    live_data.fetch_live = lambda basin=live_data.UPPER_BHIMA: dead_obs(basin)
+
+
 def fresh_app() -> "AppTest":
     install_stub()
     at = AppTest.from_file(APP, default_timeout=TIMEOUT)
     at.run()
     return at
+
+
+def widget_keys(at) -> set[str]:
+    """Every ``kind:key`` on the page — used to assert a widget is *absent*."""
+    found: set[str] = set()
+    for kind in ("button", "slider", "radio"):
+        try:
+            found |= {f"{kind}:{w.key}" for w in getattr(at, kind)}
+        except Exception:
+            pass
+    return found
 
 
 def exc_text(at) -> str:
@@ -253,8 +281,98 @@ def test_f() -> None:
     check("F15 no widget default-vs-session-state warning", not bad, str(bad))
 
 
+# ---------------------------------------------------------------------------
+# TEST H — live selected, but the feed is unreachable
+# ---------------------------------------------------------------------------
+def test_h() -> None:
+    """The failure path must be honest: no dashboard, no invented numbers.
+
+    This is the other half of issue #2 — it is not enough that live is the
+    default, the app also has to behave when live cannot be served.
+    """
+    install_dead_stub()
+    at = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    at.run()
+
+    check("H1 an unreachable feed does not raise", not at.exception, exc_text(at))
+    check("H2 the app stays in live mode — it never switches for the user",
+          at.session_state["mode"] == "live", str(at.session_state["mode"]))
+
+    text = page_text(at)
+    check("H3 the unavailable badge is shown",
+          "Live data unavailable" in text)
+    check("H4 the panel explains that nothing measured is available",
+          "Live feed unreachable" in text
+          and "nothing measured to show" in text)
+    check("H5 it says numbers are withheld rather than estimated",
+          "No numbers are displayed" in text)
+
+    keys = widget_keys(at)
+    check("H6 a retry button is offered",
+          "button:live_retry_now" in keys, str(sorted(keys)))
+    check("H7 demo mode is offered as an explicit choice",
+          "button:live_fallback_demo" in keys, str(sorted(keys)))
+
+    # The critical assertion: the dashboard must be REPLACED, not decorated.
+    leaked = [phrase for phrase in ("Performance at a glance",
+                                    "Operational Real-Time Engine Execution",
+                                    "Real-time observations")
+              if phrase in text]
+    check("H8 no dashboard is rendered from fallback values", not leaked,
+          f"leaked {leaked}")
+
+    # …and the demo clock must not appear either — that would be the very
+    # "demo presented as live" confusion the fix exists to prevent.
+    check("H9 the demo story clock does not leak into the failure panel",
+          H.BASE_TIME.strftime("%d %b %Y") not in text)
+
+    install_stub()                      # leave the module as we found it
+
+
+# ---------------------------------------------------------------------------
+# TEST I — the optional Nugen briefing layer, both configured and not
+# ---------------------------------------------------------------------------
+def test_i() -> None:
+    """Off without a key, armed with one, and never auto-firing either way."""
+    for var in ("NUGEN_API_KEY", "HYDRO_NUGEN_KEY"):
+        os.environ.pop(var, None)
+
+    at = fresh_app()
+    check("I1 the app renders with no key configured", not at.exception,
+          exc_text(at))
+    text = page_text(at)
+    check("I2 the briefing panel is present but declared optional",
+          "Plain-language briefing (optional)" in text)
+    check("I3 it states the layer is off, and how to switch it on",
+          "Briefing layer is off" in text and "NUGEN_API_KEY" in text)
+    check("I4 no generate button exists without a key",
+          "button:nugen_go" not in widget_keys(at))
+
+    # ---- with a key present ---------------------------------------------
+    os.environ["NUGEN_API_KEY"] = "verify-app-not-a-real-key"
+    try:
+        at = fresh_app()
+        check("I5 the app renders with a key configured", not at.exception,
+              exc_text(at))
+        check("I6 the generate button appears once a key is configured",
+              "button:nugen_go" in widget_keys(at))
+        text = page_text(at)
+        check("I7 the remaining call budget is shown",
+              "calls left this session" in text)
+        # Quota discipline: nothing may be sent on a plain page render.
+        check("I8 nothing is requested until the button is pressed",
+              "No briefing requested yet" in text)
+        check("I9 the full token budget is still unspent after a render",
+              nugen_client.budget_left() == nugen_client.CALL_BUDGET,
+              f"{nugen_client.budget_left()} of {nugen_client.CALL_BUDGET} left")
+        check("I10 the key itself is never rendered into the page",
+              "verify-app-not-a-real-key" not in text)
+    finally:
+        os.environ.pop("NUGEN_API_KEY", None)
+
+
 def main() -> int:
-    for fn in (test_e, test_f):
+    for fn in (test_e, test_f, test_h, test_i):
         try:
             fn()
         except Exception as exc:                        # a raise is a failure

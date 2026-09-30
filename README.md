@@ -242,7 +242,7 @@ PCCOE HYDRO/
 ├── nugen_client.py        # optional plain-language briefing layer (off by default)
 ├── verify_demo_golden.py  # regression guard: demo output must stay byte-identical
 ├── verify_fixes.py        # acceptance checks: clock, directives, zones, timing
-├── verify_app.py          # Streamlit AppTest smoke test (both modes)
+├── verify_app.py          # Streamlit AppTest checks (modes, failure path, briefing layer)
 ├── requirements.txt       # streamlit + plotly + numpy + requests
 ├── render.yaml            # Render Blueprint (one-click cloud deploy)
 ├── README.md              # this file

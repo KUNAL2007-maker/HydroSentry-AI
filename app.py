@@ -523,7 +523,7 @@ def _deck_map(df, center_lat, center_lon, zoom=10.5, height=243, radius_scale=1.
                  "style": {"backgroundColor": C["brand"], "color": "white",
                            "fontSize": "12px", "padding": "6px 8px"}},
     )
-    st.pydeck_chart(deck, use_container_width=True, height=height)
+    st.pydeck_chart(deck, width="stretch", height=height)
 
 
 _SEV_RANK = {"safe": 0, "watch": 1, "warning": 2, "critical": 3}
@@ -940,9 +940,9 @@ with st.sidebar:
         c_step, c_restart = st.columns(2)
         with c_step:
             st.button("Step ▶", on_click=_on_step, disabled=ss.live,
-                      use_container_width=True)
+                      width="stretch")
         with c_restart:
-            st.button("Restart ↻", on_click=_on_restart, use_container_width=True)
+            st.button("Restart ↻", on_click=_on_restart, width="stretch")
 
         if ss.live:
             m('<span class="hs-live"><span class="hs-live__dot"></span>Live simulation</span>')
@@ -973,7 +973,7 @@ with st.sidebar:
             _q = st.text_input("Search any place", value=ss.place_query,
                                placeholder="Search any place (e.g. Nashik, Solapur)…",
                                label_visibility="collapsed")
-            _go = st.form_submit_button("🔍  Search", use_container_width=True)
+            _go = st.form_submit_button("🔍  Search", width="stretch")
         if _go and _q.strip():
             ss.place_query = _q
             _matches = live_data.search_places(_q)
@@ -987,7 +987,7 @@ with st.sidebar:
         if len(_matches) > 1:
             m('<div class="hs-cap" style="margin:2px 0 4px;">Other matches</div>')
             for _nm, _la, _lo, _tz in _matches[1:5]:
-                if st.button(_nm, key=f"place_{_nm}_{_la:.3f}", use_container_width=True):
+                if st.button(_nm, key=f"place_{_nm}_{_la:.3f}", width="stretch"):
                     _set_region(live_data.Basin(_nm, _la, _lo, _tz))
                     st.rerun()
         elif ss.get("place_query") and not _matches:
@@ -1000,7 +1000,7 @@ with st.sidebar:
         m('<div class="hs-cap" style="margin:-4px 0 8px;line-height:1.5;">'
           f'Real-time weather &amp; hydrology · <b>{_b.name}</b><br>'
           f'{_b.lat:.4f}°N, {_b.lon:.4f}°E</div>')
-        st.button("↻  Refresh now", on_click=_on_refresh_live, use_container_width=True)
+        st.button("↻  Refresh now", on_click=_on_refresh_live, width="stretch")
 
         if obs.ok and not obs.stale:
             m('<span class="hs-live"><span class="hs-live__dot"></span>Live data · connected</span>')
@@ -1033,7 +1033,7 @@ with st.sidebar:
         st.slider("Current reservoir % (manual operator input)", 0, 100,
                   key="res_pct", label_visibility="collapsed")
         st.button("Set to Seasonal Normal (78%)", key="res_pct_normal_btn",
-                  on_click=_set_seasonal_normal, use_container_width=True)
+                  on_click=_set_seasonal_normal, width="stretch")
         _rshort = _esc(H.place_from_region(ss.region_name).short)
         m('<div class="hs-cap" style="margin:-4px 0 4px;">'
           f'{_rshort} has no free public reservoir-level feed — set the current storage '
@@ -1782,7 +1782,7 @@ def render_nugen_panel(s, d):
     left, right = st.columns([2, 1])
     with left:
         go = st.button("Generate operator briefing", key="nugen_go",
-                       use_container_width=True)
+                       width="stretch")
     with right:
         st.markdown(
             f'<div class="hs-cap" style="padding-top:8px;">Model '
@@ -1873,12 +1873,12 @@ def _render_live_unreachable():
     st.write("")
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("↻ Retry now", key="live_retry_now", use_container_width=True):
+        if st.button("↻ Retry now", key="live_retry_now", width="stretch"):
             _on_refresh_live()
             _safe_rerun()
     with c2:
         if st.button("🎬 Use demo mode instead", key="live_fallback_demo",
-                     use_container_width=True):
+                     width="stretch"):
             ss.mode = "demo"
             ss.tick = 0
             ss.last_tick_time = time.monotonic()
@@ -1961,11 +1961,18 @@ st.fragment(render_dashboard, run_every=_run_every)()
 # ============================================================================
 # FOOTER
 # ============================================================================
-_foot_right = (
-    f"Real-time observations for {ss.region_name} · physics computed on-device."
-    if ss.mode == "live" else
-    "Live physics + statistics simulation of the Upper Bhima Basin · runs fully offline."
-)
+# The footer sits OUTSIDE the dashboard fragment, so it must not claim live
+# observations while the fragment is showing the "feed unreachable" panel —
+# that is the same demo-as-live confusion issue #2 exists to prevent.
+if ss.mode != "live":
+    _foot_right = ("Live physics + statistics simulation of the Upper Bhima Basin "
+                   "· runs fully offline.")
+elif ss.get("_live_ever_ok"):
+    _foot_right = (f"Real-time observations for {ss.region_name} "
+                   "· physics computed on-device.")
+else:
+    _foot_right = (f"Waiting for the first real-time reading for {ss.region_name} "
+                   "· nothing is estimated.")
 m(
     '<div class="hs-foot">'
     '<span>HydroSentry-AI — physics-guided flood &amp; drought intelligence · Indradhanu 2026</span>'
