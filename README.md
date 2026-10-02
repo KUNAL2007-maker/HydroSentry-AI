@@ -170,17 +170,22 @@ Live observations (Open-Meteo) → Forcing → Gamma UH convolution
   → FAO-56 ESR / ESP → BasinState → Rule-based directives → Dashboard
 ```
 
-### Layer 2 — Research & Neural Surrogates (not in the live path)
+### Layer 2 — Research & Neural Surrogates (does not produce a number)
 
-The research track targets what the closed-form engine deliberately does not
+Layer 2 has two tracks, and neither one computes a value the console displays.
+
+The **research track** targets what the closed-form engine deliberately does not
 attempt — full 2D inundation mapping and learned error correction: a **PINN**
-flood-map surrogate, an **MC-LSTM-PET** drought forecaster, **Errorcastnet** bias
-correction, and the **Nugen** plain-language briefing layer.
+flood-map surrogate, an **MC-LSTM-PET** drought forecaster and **Errorcastnet**
+bias correction. None of it executes to render the console.
 
-The headline **~82.9 s** figure belongs here: it is the PINN surrogate's benchmark
-for producing a 2D depth map, against **~2.3 h** for an equivalent HEC-RAS 2D run
-(~100× faster). **It is a research benchmark, not the runtime of the operational
-engine** — nothing in Layer 2 is executed to render the console.
+The **language track** is the **Nugen** briefing layer, and it does run — on every
+update, in the product. It is described in full below.
+
+The headline **~82.9 s** figure belongs to the research track: it is the PINN
+surrogate's benchmark for producing a 2D depth map, against **~2.3 h** for an
+equivalent HEC-RAS 2D run (~100× faster). **It is a research benchmark, not the
+runtime of the operational engine.**
 
 ```
 Historical / synthetic events → PINN 2D Saint-Venant surrogate → ~82.9 s depth map
@@ -188,26 +193,50 @@ Historical / synthetic events → PINN 2D Saint-Venant surrogate → ~82.9 s dep
   → Validation vs HEC-RAS 2D & gauges → Research notebooks
 ```
 
-Layer 2 components are staged behind the same `simulate()` seam, so each can be
-promoted into Layer 1 once it is validated against gauge records.
+Research-track components are staged behind the same `simulate()` seam, so each can
+be promoted into Layer 1 once it is validated against gauge records.
 
-### Optional: the Nugen briefing layer
+### The Nugen language layer
 
-The **Model & validation** tab can ask a small hosted model
-([`nugen_client.py`](nugen_client.py)) to re-word the directives the rule engine has
-already produced into a short duty-officer briefing. It is off by default, runs only
-when you press the button, and never touches the forecast: it is handed the computed
-figures and nothing else, and every number it prints is checked back against the
-computed state before it is shown.
+A directive is written once but read by three different people. The duty engineer
+wants gate settings, the farmer wants to know whether to irrigate, and the disaster
+officer wants to know who to move and when. Every role tab therefore carries a
+**Nugen briefing** ([`nugen_client.py`](nugen_client.py)) beneath its directive card:
+the same decision the rule engine already made, re-worded for the reader that tab is
+for. The model is `qwen-v2p5-0p5b-instruct`, served by Nugen.
+
+The boundary is the whole design. The layer is handed the numbers Layer 1 computed
+and instructed to use nothing else; every figure it prints is checked back against
+the computed state and anything unsupported is flagged on the card itself. It cannot
+reach the physics engine, the directive cards remain the authoritative wording, and
+**the console renders identically with the layer switched off** — a 0.5B model is a
+good writer and a bad hydrologist, so it is given the writing and kept away from the
+hydrology.
 
 ```bash
 export NUGEN_API_KEY="your-key"     # or .streamlit/secrets.toml (gitignored)
 ```
 
-On Render, set `NUGEN_API_KEY` under **Environment → Environment Variables**. The key
-is never committed. Quota discipline is built in: a 500-token completion cap, a
-~220-token default, an in-process cache per basin state, and a per-session call
-budget, so the console cannot drain an account by refreshing.
+On Render, set `NUGEN_API_KEY` under **Environment → Environment Variables** — not in
+`render.yaml`, which is public. The key is never committed.
+
+**Quota discipline is built in**, because a layer that fetches as the basin changes
+has to be cheap by construction rather than by good intentions:
+
+| Device | Effect |
+| --- | --- |
+| Digest-keyed cache | One distinct situation costs at most one call per role, however many times the page re-renders |
+| No wall clock in the digest, every reading rounded | Ordinary feed jitter (31.4 → 31.5 mm/hr) is not mistaken for news and re-billed |
+| `AUTO_CALL_BUDGET` below `CALL_BUDGET` | Automatic briefings cannot consume the session; a deliberate one is always available |
+| Demo mode never auto-fires | 33 scripted ticks at a 2 s refresh would drain a budget in under a minute and say nothing new |
+| Background thread, never inline | A 30 s read timeout cannot freeze the console on the updates that matter |
+| 500-token hard cap, 150 per role briefing | Bounded cost per call |
+
+The **Model & validation** tab is the layer's audit surface: the exact prompt sent for
+every role, the calls actually spent against the allowance, and the figure check.
+`verify_app.py` test I asserts this policy against a stubbed transport — no key means
+no call, the demo never fetches, and three live renders of an unchanged basin spend
+three calls, not nine.
 
 ---
 
@@ -242,7 +271,7 @@ PCCOE HYDRO/
 ├── app.py                 # the dashboard (Streamlit, organised by tab)
 ├── hydro_engine.py        # the physics + statistics engine (demo + live)
 ├── live_data.py           # real-time basin fetch (Open-Meteo, pluggable)
-├── nugen_client.py        # optional plain-language briefing layer (off by default)
+├── nugen_client.py        # Nugen language layer: per-role briefings (needs a key)
 ├── verify_demo_golden.py  # regression guard: demo output must stay byte-identical
 ├── verify_fixes.py        # acceptance checks: clock, directives, zones, timing
 ├── verify_app.py          # Streamlit AppTest checks (modes, failure path, briefing layer)
@@ -271,8 +300,11 @@ python verify_app.py
 `simulate()` is the single seam. It accepts either a demo scenario **or** a
 `Forcing` built from live observations (`forcing_from_live`), so real data already
 flows through it today. Swap its internals for the production models — a PINN flood
-solver, an MC-LSTM-PET drought forecaster, the Errorcastnet error model and the
-Nugen directive layer — while keeping the `BasinState` fields the dashboard reads.
+solver, an MC-LSTM-PET drought forecaster and the Errorcastnet error model — while
+keeping the `BasinState` fields the dashboard reads. The Nugen language layer sits
+*outside* this seam by design: it reads the finished `BasinState` and directives and
+writes prose, so promoting a research model into Layer 1 changes what the briefings
+describe without changing the briefing layer at all.
 New live signals plug in the same way: extend `LiveObs` in [`live_data.py`](live_data.py)
 and map them in `forcing_from_live`. The design tokens (colours) live in the
 `C = {...}` dict and the `:root` CSS block so the look stays consistent as
