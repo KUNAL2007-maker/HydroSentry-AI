@@ -16,8 +16,9 @@ Two things are checked here that cannot be checked any other way:
 * **Test H** — the other half of live-by-default: when the feed cannot be
   reached, the dashboard is *replaced* by an honest panel with a retry, so a
   fallback state is never dressed up as real observations.
-* **Test I** — the optional Nugen briefing layer is off without a key, armed
-  with one, and spends no quota on a plain page render either way.
+* **Test I** — the Nugen briefing layer is wired into all three role tabs, is
+  off without a key, and stays inside its call budget: never automatic in the
+  demo, and at most one call per role per situation when live.
 * **Test J** — the cloud case: the server's own feed call is refused while the
   visitor's in-browser fetch is still in flight, so the first render must say
   "fetching", and a miss that outlives that grace must still say "unreachable".
@@ -34,6 +35,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 from datetime import datetime
 
 # Must be set before app.py is executed: it disables the browser-side fetch
@@ -333,45 +335,166 @@ def test_h() -> None:
 
 
 # ---------------------------------------------------------------------------
-# TEST I — the optional Nugen briefing layer, both configured and not
+# TEST I — the Nugen language layer: on every role tab, and still on a budget
 # ---------------------------------------------------------------------------
+#
+# This test used to assert that the layer sent nothing on a page render, because
+# the layer was one optional button on the last tab. It is now the product's
+# third output for every role — a briefing under each directive card, fetched in
+# the background as the basin changes — so "never send anything" is no longer
+# the policy. What replaces it is narrower, and is the risk that actually
+# matters with a metered endpoint:
+#
+#   * no key means no call and no crash, on all three role tabs;
+#   * the scripted demo never fetches automatically (33 ticks at a 2 s refresh
+#     would drain a session budget in under a minute and say nothing new);
+#   * in live mode one situation costs at most one call per role, however many
+#     times Streamlit re-runs the script;
+#   * the automatic allowance is capped strictly below the session budget, so a
+#     deliberate briefing is always still available to a reviewer;
+#   * the key never reaches the page.
+#
+# The transport is stubbed throughout, so these are assertions about what the
+# app would spend — not about Nugen being reachable from the test machine.
+def _nugen_reset() -> None:
+    """Zero the layer's cache and both spend counters.
+
+    ``reset_cache`` deliberately leaves the budget alone: it is a session-lifetime
+    guard and production code must not be able to clear it. A test that measures
+    spend per render has to, so it reaches into the module to do it.
+    """
+    nugen_client.reset_cache()
+    nugen_client._calls_made = 0
+    nugen_client._auto_calls = 0
+    with nugen_client._lock:
+        nugen_client._inflight.clear()
+
+
+def _stub_nugen() -> dict:
+    """Install a local stub transport and return its fresh call counter.
+
+    The stub writes into the real cache under the real key, so the de-duplication
+    being measured is the client's own behaviour and not an artefact of the stub.
+    Call this at the start of each phase: the returned counter is per-phase, and
+    a counter carried across a phase boundary would silently attribute the
+    live-by-default first render's calls to whatever is being measured next.
+
+    It does mean ``calls_made()`` stays at zero throughout — that counter lives
+    inside the real transport, which is exactly what has been replaced. The
+    automatic allowance (``auto_calls_made``) is incremented by the dispatcher
+    and is therefore the one these checks read.
+    """
+    seen: dict = {"n": 0, "roles": []}
+
+    def fake_complete(digest, api_key=None, max_tokens=0, use_cache=True,
+                      role=None):
+        seen["n"] += 1
+        seen["roles"].append(role)
+        out = nugen_client.NugenResult(
+            ok=True, max_tokens=max_tokens,
+            text="Stub briefing for the verify_app run. It prints no figures.")
+        with nugen_client._lock:
+            nugen_client._cache[
+                nugen_client._cache_id(digest, max_tokens, role)] = out
+        return out
+
+    nugen_client.complete = fake_complete
+    return seen
+
+
+def _drain(seconds: float = 15.0) -> bool:
+    """Wait for the background briefing threads to land."""
+    deadline = time.time() + seconds
+    while nugen_client.pending_count() and time.time() < deadline:
+        time.sleep(0.05)
+    return nugen_client.pending_count() == 0
+
+
 def test_i() -> None:
-    """Off without a key, armed with one, and never auto-firing either way."""
     for var in ("NUGEN_API_KEY", "HYDRO_NUGEN_KEY"):
         os.environ.pop(var, None)
 
-    at = fresh_app()
-    check("I1 the app renders with no key configured", not at.exception,
-          exc_text(at))
-    text = page_text(at)
-    check("I2 the briefing panel is present but declared optional",
-          "Plain-language briefing (optional)" in text)
-    check("I3 it states the layer is off, and how to switch it on",
-          "Briefing layer is off" in text and "NUGEN_API_KEY" in text)
-    check("I4 no generate button exists without a key",
-          "button:nugen_go" not in widget_keys(at))
-
-    # ---- with a key present ---------------------------------------------
-    os.environ["NUGEN_API_KEY"] = "verify-app-not-a-real-key"
+    real_complete = nugen_client.complete
+    _nugen_reset()
+    seen = _stub_nugen()
     try:
+        # ---- no key: the layer announces itself and costs nothing ---------
         at = fresh_app()
-        check("I5 the app renders with a key configured", not at.exception,
+        check("I1 the app renders with no key configured", not at.exception,
               exc_text(at))
-        check("I6 the generate button appears once a key is configured",
-              "button:nugen_go" in widget_keys(at))
         text = page_text(at)
-        check("I7 the remaining call budget is shown",
-              "calls left this session" in text)
-        # Quota discipline: nothing may be sent on a plain page render.
-        check("I8 nothing is requested until the button is pressed",
-              "No briefing requested yet" in text)
-        check("I9 the full token budget is still unspent after a render",
-              nugen_client.budget_left() == nugen_client.CALL_BUDGET,
-              f"{nugen_client.budget_left()} of {nugen_client.CALL_BUDGET} left")
-        check("I10 the key itself is never rendered into the page",
+        check("I2 the panel presents the layer as the briefings on the role tabs",
+              "Nugen language layer" in text
+              and "Every role tab carries a Nugen briefing" in text)
+        check("I3 it states the layer is off, and how to switch it on",
+              "Briefing layer is off" in text and "NUGEN_API_KEY" in text)
+        check("I4 no generate button exists without a key",
+              "button:nugen_go" not in widget_keys(at))
+        check("I5 all three role tabs say the layer is off, in one line each",
+              text.count("layer is off, no") == 3,
+              f"found {text.count('layer is off, no')} of 3")
+        check("I6 no key means nothing was sent", seen["n"] == 0,
+              f"{seen['n']} call(s)")
+
+        # ---- with a key, demo mode: still nothing automatic ---------------
+        # Live is the default, so the app has to be *switched* to demo first,
+        # and that first live render legitimately fetches. The counters are
+        # therefore reset after the switch, so what is measured below is one
+        # demo render and nothing else.
+        os.environ["NUGEN_API_KEY"] = "verify-app-not-a-real-key"
+        at = fresh_app()
+        at.radio(key="mode").set_value("demo").run()
+        check("I7 demo mode renders with a key configured", not at.exception,
+              exc_text(at))
+        _drain()
+        _nugen_reset()
+        seen = _stub_nugen()
+        at.run()
+        _drain(2.0)
+        check("I8 the demo never fetches a briefing automatically",
+              seen["n"] == 0 and nugen_client.auto_calls_made() == 0,
+              f"{seen['n']} call(s), {nugen_client.auto_calls_made()} charged")
+
+        # ---- live mode: one call per role, then free ----------------------
+        _nugen_reset()
+        seen = _stub_nugen()
+        at = fresh_app()
+        check("I9 live mode renders with a key configured", not at.exception,
+              exc_text(at))
+        check("I10 the layer's actual spend is reported, not promised",
+              "Spent so far this session" in page_text(at))
+        check("I11 the background briefings land", _drain(),
+              f"{nugen_client.pending_count()} still in flight")
+        check("I12 one automatic call per role, and no more",
+              sorted(r or "" for r in seen["roles"])
+              == ["dam", "disaster", "farmer"], str(seen["roles"]))
+        check("I13 all three were charged to the automatic allowance",
+              nugen_client.auto_calls_made() == 3
+              and nugen_client.auto_budget_left()
+              == nugen_client.AUTO_CALL_BUDGET - 3,
+              f"{nugen_client.auto_calls_made()} charged, "
+              f"{nugen_client.auto_budget_left()} of "
+              f"{nugen_client.AUTO_CALL_BUDGET} left")
+
+        at.run()
+        text = page_text(at)
+        check("I14 the briefing is then on the page for each role",
+              text.count("Stub briefing for the verify_app run") == 3,
+              f"found {text.count('Stub briefing for the verify_app run')} of 3")
+        at.run()
+        _drain(2.0)
+        check("I15 re-rendering an unchanged basin spends nothing further",
+              seen["n"] == 3, f"{seen['n']} call(s) after three renders")
+
+        check("I16 the automatic allowance is capped below the session budget",
+              0 < nugen_client.AUTO_CALL_BUDGET < nugen_client.CALL_BUDGET,
+              f"{nugen_client.AUTO_CALL_BUDGET} of {nugen_client.CALL_BUDGET}")
+        check("I17 the key itself is never rendered into the page",
               "verify-app-not-a-real-key" not in text)
     finally:
+        nugen_client.complete = real_complete
         os.environ.pop("NUGEN_API_KEY", None)
+        _nugen_reset()
 
 
 def test_j() -> None:

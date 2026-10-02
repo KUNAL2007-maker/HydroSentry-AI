@@ -1380,6 +1380,7 @@ def render_farmer(s, d, place=None):
             meta=fd["meta"],
             cert=fd["cert"],
         ))
+        render_role_briefing(s, d, "farmer")
         st.write("")
         m(h2("Message sent to farmers", "Automatic SMS in Marathi and Hindi"))
         sms = d["sms"]
@@ -1523,6 +1524,7 @@ def render_dam(s, d, place=None):
             meta=dm["meta"],
             cert=dm["cert"],
         ))
+        render_role_briefing(s, d, "dam")
         st.write("")
         m(h2("Gate schedule", "Planned gate operations across the event"))
         rows_html = ""
@@ -1704,6 +1706,7 @@ def render_disaster(s, d, place=None):
             meta=di["meta"],
             cert=di["cert"],
         ))
+        render_role_briefing(s, d, "disaster")
         st.write("")
         m(h2("Affected zones", "Ordered by time to impact"))
         # Zones come from place.sectors, so every basin shows its own geography
@@ -1863,9 +1866,11 @@ def render_model(s, d):
     m(h2("Model &amp; validation",
          "What ran, what was measured, and what is only a reference"))
     m(note("Two separated layers. <b>Layer 1</b> is the deterministic physics "
-           "engine that produced every number on this console. <b>Layer 2</b> is "
-           "the research track &mdash; neural surrogates and published benchmarks "
-           "that are <b>not</b> in the live decision path. Everything in the "
+           "engine that produced every number on this console. <b>Layer 2</b> "
+           "never produces a number: the neural surrogates and published "
+           "benchmarks are research that does <b>not</b> run here at all, and the "
+           "Nugen language layer does run on every update but only re-words what "
+           "Layer 1 decided. Everything in the "
            "<i>Measured</i> and <i>Audit</i> blocks below is computed on this "
            "update, in front of you; everything in <i>Reference</i> is a constant "
            "and is labelled as one.",
@@ -1892,9 +1897,10 @@ def render_model(s, d):
           'this chain.</div>'
           '</div>')
     with c_l2:
-        m(h2("Layer 2 — Research &amp; Neural Surrogates", "Did not run"))
+        m(h2("Layer 2 — Research &amp; Neural Surrogates",
+             "Two tracks: one offline, one live but non-computational"))
         m('<div class="hs-layer hs-layer--research">'
-          '<div class="hs-layer__tag">Layer 2 · research track · not used for the live readings</div>'
+          '<div class="hs-layer__tag">Layer 2 · research track · did not run</div>'
           '<div class="hs-layer__h">Neural surrogates and the HEC-RAS 2D benchmark</div>'
           '<div class="hs-layer__p">Targets what the closed-form engine does not '
           'attempt: full 2D inundation mapping and learned error correction. Its '
@@ -1907,6 +1913,28 @@ def render_model(s, d):
           'records — no such module is executed today.</div>'
           '<div class="hs-cap" style="margin-top:10px;">RESEARCH / BENCHMARK PATH — '
           'offline, against historical events; none of it runs to render this console.</div>'
+          '</div>')
+        # The other half of Layer 2 does run, on every update, and saying so
+        # here is the point: a reviewer should not have to discover from the
+        # role tabs that a language model is in the product. The boundary that
+        # makes it safe is the one stated in the card — it is handed the
+        # computed numbers and writes prose, and it is never asked for one.
+        m('<div class="hs-layer hs-layer--research" style="margin-top:12px;">'
+          '<div class="hs-layer__tag">Layer 2 · language track · runs every update</div>'
+          f'<div class="hs-layer__h">Nugen <code>{nugen_client.MODEL}</code> — '
+          'the briefing under each directive</div>'
+          '<div class="hs-layer__p">The one Layer 2 component that is live in the '
+          'product. Each role tab carries a Nugen briefing beneath its directive '
+          'card, re-worded for the reader that tab is for. It is handed the '
+          'numbers Layer 1 computed and instructed to use nothing else; every '
+          'figure it prints is checked back against the computed state, and '
+          'anything unsupported is flagged on the card itself. It solves no '
+          'equation, produces no forecast and changes no value above — a 0.5B '
+          'model is a good writer and a bad hydrologist, so it is given the '
+          'writing and kept away from the hydrology.</div>'
+          '<div class="hs-cap" style="margin-top:10px;">LANGUAGE PATH — '
+          'presentational only; the console renders identically with this layer '
+          'switched off. Prompts, spend and figure checks are below.</div>'
           '</div>')
 
     # ---- MEASURED on this update ----------------------------------------
@@ -2082,7 +2110,13 @@ def render_model(s, d):
 
 
 # ---------------------------------------------------------------------------
-# TAB 5 — optional Nugen briefing layer (Layer 2, language only)
+# THE NUGEN LANGUAGE LAYER (Layer 2, language only)
+#
+# ``render_role_briefing`` is the layer itself and renders on all three role
+# tabs, inline under the directive it re-words. ``render_nugen_panel`` is its
+# audit surface on tab 5: the exact prompt per role, the spend, and the figure
+# check. Nothing here computes a value, and the console renders identically
+# with no key configured.
 # ---------------------------------------------------------------------------
 def _nugen_key() -> str:
     """Resolve the Nugen API key from Streamlit secrets, then the environment.
@@ -2106,6 +2140,12 @@ def _nugen_sig(s) -> str:
             f"{s.flood_sev}|{s.drought_sev}|{s.inflow_peak:.0f}|{s.reservoir_pct:.0f}")
 
 
+def _nugen_basin_label() -> str:
+    """How the basin is named to the briefing layer (one source for all tabs)."""
+    return (ss.region_name if ss.mode == "live"
+            else "Upper Bhima Basin (Pune, Maharashtra)")
+
+
 def _nugen_html(text: str) -> str:
     """Escaped HTML for a model reply: bullet lines become a list."""
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
@@ -2117,35 +2157,137 @@ def _nugen_html(text: str) -> str:
     return "".join(f'<p style="margin:0 0 6px;">{_esc(ln)}</p>' for ln in lines)
 
 
-def render_nugen_panel(s, d):
-    """The optional hosted-LLM briefing: re-wording only, never a forecast.
+def _nugen_figure_check(unsupported) -> str:
+    """The one-line verdict on whether the wording invented a number."""
+    bad = list(unsupported or [])
+    if bad:
+        return ('<span style="color:var(--warning)">Figure check: '
+                + _esc(", ".join(str(b) for b in bad[:6]))
+                + ' is not among the facts this layer was given — trust the '
+                  'directive above, not this wording.</span>')
+    return ('<span style="color:var(--safe)">Figure check: every number here '
+            'appears in the computed state.</span>')
 
-    Deliberately click-to-run. The account allows 500 tokens per completion, so
-    nothing here fires on a page load or on the 60-second live refresh — the
-    quota is spent only when a reviewer asks for a briefing, and repeat asks for
-    the same update are served from the client's cache.
+
+def render_role_briefing(s, d, role: str):
+    """The Nugen language layer, inline under the directive it re-words.
+
+    This is the product's third output for every role, alongside the directive
+    card and the chart: the same decision, in the register that role actually
+    reads. It sits directly beneath the authoritative card and is styled with the
+    ``--research`` modifier the rest of the app uses for "secondary, not the
+    authority", so the ordering on screen matches the ordering of trust.
+
+    How it is fetched differs by mode, and the difference is the quota:
+
+    * **Live** — fetched automatically in a background thread as the basin
+      changes. Never inline, because the transport has a 30-second read timeout
+      and a synchronous call would freeze the console on exactly the updates that
+      matter. The result is keyed on the (bucketed, clock-free) facts, so a steady
+      basin costs nothing however often the page refreshes.
+    * **Demo** — on an explicit click only. The scripted demo re-runs every two
+      seconds across 33 ticks; fetching automatically there would spend the whole
+      session budget in under a minute and say nothing new.
     """
-    m(h2("Plain-language briefing (optional)",
-         "Layer 2 · language only — Nugen hosted inference"))
-    m(note("This panel asks a small hosted language model to <b>re-word</b> the "
-           "directives the rule engine has already produced into a short duty-officer "
-           "briefing. It is given the computed numbers and instructed to use nothing "
-           "else; every figure it prints is then checked back against the computed "
-           "state and anything unsupported is flagged below. It cannot reach the "
-           "physics engine, the directive cards in the other tabs remain the "
-           "authoritative wording, and the console behaves identically when this layer "
-           "is switched off. It runs only when you press the button.",
+    cfg = nugen_client.ROLES[role]
+    key = _nugen_key()
+
+    if not key:
+        # One quiet line, not a warning box on all three tabs. The full
+        # explanation — what this layer adds, and how to switch it on — lives in
+        # the Model & validation tab, which is where a reviewer goes for it.
+        m('<div class="hs-cap" style="margin-top:2px;">'
+          f'Nugen briefing for {_esc(cfg["label"].lower())}: layer is off, no '
+          '<code>NUGEN_API_KEY</code> configured. The directive above is produced '
+          'without it — see <b>Model &amp; validation</b> for what this layer adds.'
+          '</div>')
+        return
+
+    label = _nugen_basin_label()
+    auto = ss.mode == "live" and bool(ss.get("_live_ever_ok"))
+    res = nugen_client.request_role_async(s, d, role, label, api_key=key,
+                                         auto=auto)
+
+    if res is None and not auto:
+        # Demo mode: nothing is cached for this update and nothing is fetched
+        # automatically. Offer the call only while the demo is paused — under a
+        # clock that advances every two seconds the briefing would be stale
+        # before it rendered.
+        if ss.get("live"):
+            m('<div class="hs-cap" style="margin-top:2px;">Nugen briefing: pause '
+              'the demo to generate one for a specific update, or switch to '
+              '<b>Live data</b>, where briefings are fetched automatically as the '
+              'basin changes.</div>')
+            return
+        if st.button(f"Generate the Nugen briefing — {cfg['label'].lower()}",
+                     key=f"nugen_go_{role}", width="stretch"):
+            with st.spinner("Nugen is re-wording the directive…"):
+                res = nugen_client.brief_role(s, d, role, label, api_key=key)
+        else:
+            m('<div class="hs-cap" style="margin-top:2px;">Re-words the directive '
+              f'above for this reader using Nugen <code>{nugen_client.MODEL}</code>. '
+              'Nothing on this page depends on it.</div>')
+            return
+
+    if res is None:
+        m('<div class="hs-cap" style="margin-top:2px;">Nugen is re-wording this '
+          'directive — the briefing appears here within a few seconds, without '
+          'holding up anything above.</div>')
+        return
+
+    if not res.ok:
+        m('<div class="hs-cap" style="margin-top:2px;">'
+          f'Nugen briefing unavailable: {_esc(res.error)} '
+          'The directive above is unaffected.</div>')
+        if st.button("Try the briefing again", key=f"nugen_retry_{role}"):
+            nugen_client.request_role_async(s, d, role, label, api_key=key,
+                                            auto=True, retry=True)
+            _safe_rerun()
+        return
+
+    cost = ("served from cache, no tokens spent" if res.cached
+            else (f"{res.tokens_out} completion tokens"
+                  if res.tokens_out else f"{res.max_tokens}-token cap"))
+    m('<div class="hs-layer hs-layer--research" style="margin-top:12px;">'
+      f'<div class="hs-layer__tag">Nugen {nugen_client.MODEL} · language layer</div>'
+      f'<div class="hs-layer__h">{_esc(cfg["label"])}</div>'
+      f'<div class="hs-layer__p">{_nugen_html(res.text)}</div>'
+      f'<div class="hs-cap" style="margin-top:10px;">'
+      f'{_nugen_figure_check(res.unsupported)}</div>'
+      '<div class="hs-cap" style="margin-top:4px;">Re-wording of the directive '
+      f'above · {cost} · this layer computes nothing and changes no number.</div>'
+      '</div>')
+
+
+def render_nugen_panel(s, d):
+    """The Nugen language layer's audit surface: what is sent, and what it cost.
+
+    The layer itself is not here — it renders inline on the three role tabs,
+    under the directive each briefing re-words. This panel is where a reviewer
+    checks it: the exact prompt for every role, the budget actually spent, and
+    the standing claim that no number on the dashboard comes from this layer.
+    """
+    m(h2("Nugen language layer — what is sent, and what it costs",
+         "Layer 2 · language only · the briefings on the three role tabs"))
+    m(note("Every role tab carries a Nugen briefing under its directive card: "
+           "the same decision, re-worded for the farmer, the duty engineer and the "
+           "disaster officer. The model is handed the computed numbers and "
+           "instructed to use nothing else; every figure it prints is then checked "
+           "back against the computed state and anything unsupported is flagged on "
+           "the card. It cannot reach the physics engine, the directive cards stay "
+           "the authoritative wording, and the console renders identically when "
+           "this layer is off — which is what makes it safe to put a language model "
+           "in front of a flood warning at all.",
            label="What this is, and is not"))
     st.write("")
 
     key = _nugen_key()
-    basin_label = (ss.region_name if ss.mode == "live"
-                   else "Upper Bhima Basin (Pune, Maharashtra)")
+    basin_label = _nugen_basin_label()
     sig = _nugen_sig(s)
 
     if not key:
         m('<div class="hs-layer hs-layer--research">'
-          '<div class="hs-layer__tag">Layer 2 · optional · not configured</div>'
+          '<div class="hs-layer__tag">Layer 2 · not configured</div>'
           '<div class="hs-layer__h">Briefing layer is off — no API key configured</div>'
           '<div class="hs-layer__p">This is the normal state for a public deployment: the '
           'key is never committed to the repository. To switch the layer on, set '
@@ -2157,12 +2299,13 @@ def render_nugen_panel(s, d):
           f'<code>{nugen_client.MODEL}</code> · '
           f'{nugen_client.MAX_TOKENS_LIMIT}-token completion cap.</div>'
           '</div>')
+        _render_nugen_prompts(s, d, basin_label)
         return
 
     left, right = st.columns([2, 1])
     with left:
-        go = st.button("Generate operator briefing", key="nugen_go",
-                       width="stretch")
+        go = st.button("Generate the combined briefing — all three roles",
+                       key="nugen_go", width="stretch")
     with right:
         st.markdown(
             f'<div class="hs-cap" style="padding-top:8px;">Model '
@@ -2170,6 +2313,19 @@ def render_nugen_panel(s, d):
             f'{nugen_client.DEFAULT_MAX_TOKENS}/{nugen_client.MAX_TOKENS_LIMIT} tokens · '
             f'{nugen_client.budget_left()} calls left this session.</div>',
             unsafe_allow_html=True)
+
+    # The layer's actual spend, not a promise about it. Role briefings come out
+    # of the automatic allowance; this panel's combined briefing comes out of the
+    # headroom left above it, so a reviewer can always get one on demand.
+    m(f'<div class="hs-cap" style="margin-top:8px;">Spent so far this session: '
+      f'<b>{nugen_client.calls_made()}</b> network call'
+      f'{"" if nugen_client.calls_made() == 1 else "s"} of '
+      f'{nugen_client.CALL_BUDGET}, of which <b>{nugen_client.auto_calls_made()}</b> '
+      f'were the automatic role briefings (allowance '
+      f'{nugen_client.AUTO_CALL_BUDGET}, {nugen_client.auto_budget_left()} left). '
+      f'A briefing is keyed on the facts it was written from, so an unchanged '
+      f'basin re-renders its briefings for free however often the page refreshes.'
+      f'</div>')
 
     if go:
         with st.spinner("Re-wording the directives…"):
@@ -2183,9 +2339,11 @@ def render_nugen_panel(s, d):
 
     data = ss.get("_nugen")
     if not data:
-        m('<div class="hs-cap" style="margin-top:8px;">No briefing requested yet. '
-          'Nothing is sent until you press the button, so the token budget is spent '
-          'only on demand.</div>')
+        m('<div class="hs-cap" style="margin-top:8px;">No combined briefing '
+          'requested yet — the per-role briefings on the three role tabs are the '
+          'layer\'s normal output, and this button is the manual path to all three '
+          'in one paragraph. Nothing is sent for it until you press it.</div>')
+        _render_nugen_prompts(s, d, basin_label)
         return
 
     if not data.get("ok"):
@@ -2193,6 +2351,7 @@ def render_nugen_panel(s, d):
                label="Briefing unavailable"))
         m('<div class="hs-cap" style="margin-top:6px;">The dashboard above is '
           'unaffected — the briefing layer is presentational.</div>')
+        _render_nugen_prompts(s, d, basin_label)
         return
 
     stale = data.get("sig") != sig
@@ -2226,6 +2385,29 @@ def render_nugen_panel(s, d):
         st.caption("Only the computed state and the approved directives are sent, "
                    "after a fixed instruction and one worked example. No credentials, "
                    "no user input and no raw observations leave the app.")
+    _render_nugen_prompts(s, d, basin_label)
+
+
+def _render_nugen_prompts(s, d, basin_label: str):
+    """The exact prompt behind each role briefing, verbatim and in full.
+
+    The claim this layer makes is that it is handed the computed numbers and may
+    use nothing else. That claim is only worth anything if the prompt is visible,
+    so it is printed here in full, for every role, whether or not a key is
+    configured — a reviewer can audit the layer on a deployment that has never
+    called it.
+    """
+    with st.expander("The exact prompt behind each role briefing"):
+        st.caption(
+            f"One request per role, {nugen_client.ROLE_MAX_TOKENS} tokens each. "
+            "The role digests carry no wall clock and round every reading, which "
+            "is what lets a briefing be cached per situation instead of re-billed "
+            "per refresh. Nothing but these lines reaches the endpoint: no "
+            "credentials, no user input, no raw observations.")
+        for role, cfg in nugen_client.ROLES.items():
+            st.markdown(f"**{cfg['label']}** — `role={role}`")
+            st.code(nugen_client.role_preview(s, d, role, basin_label),
+                    language="text")
 
 
 # ---------------------------------------------------------------------------
@@ -2385,6 +2567,14 @@ if ss.mode == "live":
     # This costs no extra network — live_data throttles a failed basin to one
     # fetch per ~20 s regardless of how often the fragment reruns.
     _run_every = LIVE_REFRESH_SECS if ss.get("_live_ever_ok") else FIRST_LOAD_POLL_SECS
+    # A briefing fetched in the background lands whenever the endpoint answers,
+    # which the fragment only notices on its next rerun. At the 60 s cadence that
+    # would leave a "re-wording this directive" line sitting there for up to a
+    # minute after the text was ready. While something is in flight, poll at the
+    # first-load rate instead; this reverts by itself when the last thread lands,
+    # and costs no network of its own (live_data throttles the feed per basin).
+    if nugen_client.pending_count():
+        _run_every = min(_run_every, FIRST_LOAD_POLL_SECS)
 else:
     _run_every = ss.interval if (ss.live and ss.tick < H.TICKS_MAX) else None
 
