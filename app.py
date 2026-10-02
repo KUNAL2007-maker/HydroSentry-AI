@@ -2248,14 +2248,19 @@ def render_role_briefing(s, d, role: str):
     cost = ("served from cache, no tokens spent" if res.cached
             else (f"{res.tokens_out} completion tokens"
                   if res.tokens_out else f"{res.max_tokens}-token cap"))
+    # The tag is kept short deliberately: it renders as uppercase mono with
+    # letter-spacing inside a ~55%-width column, and the model id is long enough
+    # to wrap it onto two lines. The id is evidence, not a heading, so it sits in
+    # the footer with the other evidence — what it cost, and the figure check.
     m('<div class="hs-layer hs-layer--research" style="margin-top:12px;">'
-      f'<div class="hs-layer__tag">Nugen {nugen_client.MODEL} · language layer</div>'
+      '<div class="hs-layer__tag">Nugen · language layer</div>'
       f'<div class="hs-layer__h">{_esc(cfg["label"])}</div>'
       f'<div class="hs-layer__p">{_nugen_html(res.text)}</div>'
       f'<div class="hs-cap" style="margin-top:10px;">'
       f'{_nugen_figure_check(res.unsupported)}</div>'
       '<div class="hs-cap" style="margin-top:4px;">Re-wording of the directive '
-      f'above · {cost} · this layer computes nothing and changes no number.</div>'
+      f'above by <code>{nugen_client.MODEL}</code> · {cost} · this layer computes '
+      'nothing and changes no number.</div>'
       '</div>')
 
 
