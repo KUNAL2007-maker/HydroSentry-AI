@@ -459,22 +459,54 @@ def directive(title, severity, sev_label, situation, actions, meta, cert):
     )
 
 
-def style_fig(fig, height=230):
-    """Apply the shared light-theme look to a plotly figure."""
+def style_fig(fig, height=230, legend=False):
+    """Apply the shared light-theme look to a plotly figure.
+
+    ``legend=True`` is required for any figure carrying more than one trace —
+    the default stays off because most charts here are single-series, but a
+    silently legend-less multi-trace chart is unreadable.
+
+    ``uirevision`` is pinned to a constant so a pan/zoom or an open hover card
+    survives the auto-refresh tick (the dashboard re-renders every 2 s in demo
+    mode and every 60 s live); without it the viewer's interaction is thrown
+    away on each rerun.
+    """
     fig.update_layout(
         height=height,
-        margin=dict(l=8, r=8, t=10, b=8),
+        margin=dict(l=10, r=10, t=10, b=8),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(family="IBM Plex Sans, sans-serif", color=C["ink"], size=12),
-        showlegend=False,
+        showlegend=legend,
+        hovermode="x unified",
+        separators=". ",          # 1 250 m³/s, not 1250
+        uirevision="hydro",
+        hoverlabel=dict(bgcolor=C["brand"], bordercolor=C["brand"],
+                        font=dict(family="IBM Plex Sans, sans-serif",
+                                  color="white", size=12)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.0,
+                    xanchor="left", x=0, bgcolor="rgba(0,0,0,0)",
+                    font=dict(size=11)),
     )
+    # 10 px margins cannot hold a 4-digit tick label; let plotly reclaim space.
+    fig.update_xaxes(automargin=True)
+    fig.update_yaxes(automargin=True)
     return fig
 
 
-def chart_placeholder(text):
-    m(f'<div class="hs-panel" style="height:230px;display:grid;place-items:center;'
+def chart_placeholder(text, height=230):
+    m(f'<div class="hs-panel" style="height:{height}px;display:grid;place-items:center;'
       f'color:{C["muted"]};font-size:13px;">{text}</div>')
+
+
+# Pale band fills for gauges, matching the badge tints in the CSS block above so
+# a severity reads identically whether it appears as a dial band or a pill.
+SEV_TINT = {
+    "safe":     "#E7F5EE",
+    "watch":    "#FBF2D8",
+    "warning":  "#FBEBDF",
+    "critical": "#FBE6E4",
+}
 
 
 # ============================================================================
@@ -488,6 +520,17 @@ def _rgb(hex_color, alpha=220):
 
 def _sev_color(sev, alpha=220):
     return _rgb(C.get(sev, C["teal"]), alpha)
+
+
+def _rgba_css(hex_color, alpha=0.10):
+    """'#1F5FB0', 0.08 -> 'rgba(31,95,176,0.08)' for plotly fills.
+
+    Plotly wants the alpha channel in 0-1, unlike ``_rgb`` which produces the
+    0-255 form pydeck needs — keeping them separate avoids an invalid colour
+    string that plotly silently renders as opaque.
+    """
+    r, g, b, _ = _rgb(hex_color)
+    return f"rgba({r},{g},{b},{alpha})"
 
 
 def _deck_map(df, center_lat, center_lon, zoom=10.5, height=243, radius_scale=1.0):
@@ -534,36 +577,67 @@ def render_basin_snapshot(s, height=243):
     hotspots, colored by the live flood & drought severity."""
     lat, lon = ss.region_lat, ss.region_lon
     worst = max(s.flood_sev, s.drought_sev, key=lambda x: _SEV_RANK.get(x, 0))
+    wilt = (f"{s.days_to_wilting:.1f} d to wilting"
+            if math.isfinite(s.days_to_wilting) else "no wilting projected")
     rows = [
         # basin centre — colored by the more severe of the two hazards
         {"lat": lat, "lon": lon, "color": _sev_color(worst),
          "radius": 900, "label": ss.region_name,
-         "detail": f"Flood: {SEV_LABEL[s.flood_sev]} · Drought: {SEV_LABEL[s.drought_sev]}"},
+         "detail": f"Flood: {SEV_LABEL[s.flood_sev]} · Drought: {SEV_LABEL[s.drought_sev]}"
+                   f"<br/>Peak inflow {s.inflow_peak:,.0f} m³/s in {s.inflow_peak_in_h:.1f} h"
+                   f"<br/>Engine runtime {s.real_compute_ms:.2f} ms"},
         # agricultural belt (drought signal) — indicative position NE of centre
         {"lat": lat + 0.10, "lon": lon + 0.12, "color": _sev_color(s.drought_sev),
          "radius": 620, "label": "Agricultural belt (indicative)",
-         "detail": f"Drought: {SEV_LABEL[s.drought_sev]} · ESP {s.esp:.0f}th %ile"},
+         "detail": f"Drought: {SEV_LABEL[s.drought_sev]} · ESP {s.esp:.1f}th %ile"
+                   f"<br/>Root-zone moisture {s.soil_moisture:.3f} m³/m³ · {wilt}"},
         # riverside / reservoir (flood signal) — indicative position SW of centre
         {"lat": lat - 0.09, "lon": lon - 0.10, "color": _sev_color(s.flood_sev),
          "radius": 620, "label": "Riverside & reservoir (indicative)",
-         "detail": f"Flood: {SEV_LABEL[s.flood_sev]} · reservoir {s.reservoir_pct:.0f}%"},
+         "detail": f"Flood: {SEV_LABEL[s.flood_sev]} · reservoir {s.reservoir_pct:.1f}%"
+                   f"<br/>Release {s.release_now:,.0f} m³/s · level {s.reservoir_level:.1f} m"
+                   f"<br/>Downstream {s.q_downstream:,.0f} m³/s "
+                   f"(levee {H.LEVEE_Q:,.0f})"},
     ]
     if HAS_PYDECK:
         _deck_map(pd.DataFrame(rows), lat, lon, zoom=9.2, height=height)
     else:
         _deck_map(None, lat, lon, height=height)
     m('<div class="hs-map__legend" style="position:static;margin-top:8px;">'
-      '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--flood)"></span>Flood signal</span>'
-      '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--drought)"></span>Drought signal</span>'
+      '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--safe)"></span>Safe</span>'
+      '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--watch)"></span>Watch</span>'
+      '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--warning)"></span>Warning</span>'
+      '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--critical)"></span>Critical</span>'
       '</div>'
-      '<div class="hs-cap" style="margin-top:4px;">Basin centre uses live coordinates; '
-      'hotspot markers are indicative placements around the centre.</div>')
+      '<div class="hs-cap" style="margin-top:4px;">Marker colour is the live severity '
+      'and marker size is the basin centre vs. its two hazard signals; hover any marker for '
+      'the figures behind it. Basin centre uses live coordinates — hotspot markers are '
+      'indicative placements around the centre, not surveyed hazard polygons.</div>')
 
 
 def _risk_sev(risk) -> str:
     """Map a zone's risk label ('High'/'Medium'/'Low') to a severity colour."""
     return {"high": "critical", "medium": "warning", "low": "watch"}.get(
         str(risk or "").strip().lower(), "safe")
+
+
+def _tto_sev(mins) -> str:
+    """Severity for a zone's time-to-impact, on the ENGINE's own flood bands.
+
+    ``hydro_engine.simulate`` escalates the basin at ``time_to_overtop_min <=
+    100`` (critical) and ``<= 120`` (warning). This function is the single
+    source of that mapping for the UI: the evacuation map and the affected-zones
+    table both call it, so a zone can never show a green dot beside a yellow
+    badge. ``safe`` means no impact is expected at all — a finite arrival time
+    beyond the warning band is still a ``watch``.
+    """
+    if not math.isfinite(mins):
+        return "safe"
+    if mins <= 100:
+        return "critical"
+    if mins <= 120:
+        return "warning"
+    return "watch"
 
 
 def render_evacuation_map(s, tto, at_risk, height=320, place=None):
@@ -573,15 +647,6 @@ def render_evacuation_map(s, tto, at_risk, height=320, place=None):
     lat, lon = ss.region_lat, ss.region_lon
     finite = math.isfinite(tto)
 
-    def _tsev(mins):
-        if not math.isfinite(mins):
-            return "safe"
-        if mins <= 100:
-            return "critical"
-        if mins <= 180:
-            return "warning"
-        return "safe"
-
     # the Place's zones, staged along an indicative line near the centre
     rows = []
     for z in pl.sectors:
@@ -589,16 +654,22 @@ def render_evacuation_map(s, tto, at_risk, height=320, place=None):
         if hh is None:
             hh = round(at_risk * float(z.get("share", 0.0)))
         mins = tto + float(z.get("delay", 0)) if finite else float("inf")
-        sev = _tsev(mins)
+        sev = _tto_sev(mins)
         when = "no impact expected" if not math.isfinite(mins) else (
             "impact imminent" if mins <= 1 else f"impact in ~{int(round(mins))} min")
-        detail = f"{when} · {(hh if finite else 0):,} households"
+        shown_hh = hh if finite else 0
+        detail = f"{when} · {shown_hh:,} households"
         if z.get("elev"):
             detail += f" · {z['elev']}"
+        if finite and s.overtop_depth > 0:
+            detail += f"<br/>Overtopping depth ~{s.overtop_depth:.2f} m"
+        detail += (f"<br/>Downstream {s.q_downstream:,.0f} m³/s vs levee crest "
+                   f"{H.LEVEE_Q:,.0f} m³/s")
         rows.append({"lat": lat + float(z.get("dlat", 0.0)),
                      "lon": lon + float(z.get("dlon", 0.0)),
                      "color": _sev_color(sev),
-                     "radius": 500,
+                     # radius encodes exposure: households, not a constant
+                     "radius": 240 + 16.0 * math.sqrt(max(0.0, float(shown_hh))),
                      "label": f"{z['name']} — {z.get('zone', '')} (indicative)".strip(),
                      "detail": detail})
     # a safe-ground shelter marker
@@ -610,12 +681,15 @@ def render_evacuation_map(s, tto, at_risk, height=320, place=None):
     else:
         _deck_map(None, lat, lon, height=height)
     m('<div class="hs-map__legend" style="position:static;margin-top:8px;">'
-      '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--critical)"></span>Evacuate now</span>'
-      '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--warning)"></span>Stand by</span>'
+      '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--critical)"></span>Evacuate now (≤100 min)</span>'
+      '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--warning)"></span>Stand by (≤120 min)</span>'
+      '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--watch)"></span>Monitor (>120 min)</span>'
       '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--safe)"></span>Safe ground</span>'
       '</div>'
-      '<div class="hs-cap" style="margin-top:4px;">Zone positions are indicative placements '
-      'around the basin centre; severity tracks the live time-to-impact.</div>')
+      '<div class="hs-cap" style="margin-top:4px;">Colour bands are the engine\'s own '
+      'escalation thresholds (100 / 120 minutes to levee overtopping) and marker area '
+      'scales with the households exposed in each zone. Zone positions are indicative '
+      'placements around the basin centre, not surveyed boundaries.</div>')
 
 
 # ============================================================================
@@ -640,6 +714,7 @@ ss.setdefault("region_tz", live_data.UPPER_BHIMA.tz)
 ss.setdefault("place_query", "")        # free-text search box contents
 
 LIVE_REFRESH_SECS = 60                  # how often the live panel refreshes
+FIRST_LOAD_POLL_SECS = 3                # ...and how often until the first reading lands
 
 
 def current_basin() -> live_data.Basin:
@@ -714,7 +789,12 @@ def _browser_live_pump(basin):
     """
     if not (USE_BROWSER_LIVE and HAS_JS_EVAL):
         return
-    bucket = int(time.time() // LIVE_REFRESH_SECS)
+    # The JS only re-evaluates when the expression string changes, so the bucket
+    # is what paces the browser's re-fetch. On a 60 s bucket the first attempt
+    # could only be retried on a minute boundary — so until a reading has landed
+    # the bucket ticks with the fast first-load poll instead.
+    _bucket_secs = LIVE_REFRESH_SECS if ss.get("_live_ever_ok") else FIRST_LOAD_POLL_SECS
+    bucket = int(time.time() // _bucket_secs)
     nonce = ss.get("_live_nonce", 0)
     url = f"{live_data.forecast_url(basin)}&_cb={bucket}.{nonce}"
     # Always resolve to a plain object: real data, Open-Meteo's {error:true,…},
@@ -726,6 +806,30 @@ def _browser_live_pump(basin):
     if obs is not None:
         ss.setdefault("_browser_obs", {})[live_data._basin_key(basin)] = (
             time.monotonic(), obs)
+
+
+def _live_connecting(misses_recorded: int | None = None) -> bool:
+    """True while the first reading may still legitimately be in flight.
+
+    The sidebar badge and the main panel both read this one function, so they
+    can never disagree about whether the feed is "connecting" or "down".
+
+    On a cloud host the *server's* own Open-Meteo call is routinely 429'd on the
+    shared datacentre IP while the visitor's in-browser fetch succeeds a beat
+    later — so a miss on the very first paint is a loading state, not a failure,
+    and saying "unavailable" there makes a working console look broken.
+
+    ``misses_recorded`` is how many misses are known at the caller's point in
+    the render. The sidebar runs *before* the fragment records this run's
+    outcome, so it passes nothing and is judged on misses so far; the fragment
+    passes the count including its own.
+    """
+    if ss.get("_live_ever_ok"):
+        return False
+    if not (USE_BROWSER_LIVE and HAS_JS_EVAL):
+        return False            # no browser bridge: a server miss is a real miss
+    seen = ss.get("_live_misses", 0) if misses_recorded is None else misses_recorded
+    return seen <= (0 if misses_recorded is None else 1)
 
 
 def _get_live_current():
@@ -799,6 +903,7 @@ def _on_refresh_live():
     live_data.clear_live_cache()
     ss["_live_nonce"] = ss.get("_live_nonce", 0) + 1   # re-fetch the browser feed too
     ss["_live_tries"] = 0             # an explicit retry starts the grace again
+    ss["_live_misses"] = 0
 
 
 def _set_region(basin):
@@ -810,6 +915,7 @@ def _set_region(basin):
     live_data.clear_live_cache(basin)
     ss["_live_nonce"] = ss.get("_live_nonce", 0) + 1   # re-fetch the browser feed too
     ss["_live_tries"] = 0             # a new region gets its own first-read grace
+    ss["_live_misses"] = 0
 
 
 def _on_preset_change():
@@ -1015,13 +1121,26 @@ with st.sidebar:
               'reading — a fresh fetch was rate-limited. The forecast is still running '
               'on live values; it refreshes automatically when the feed frees up.</div>')
         else:
-            m('<span class="hs-badge hs-badge--warning"><span class="hs-dot"></span>'
-              'Data unavailable — fallback</span>')
-            if obs.error:
-                m('<div class="hs-cap" style="color:var(--warning);margin:4px 0 2px;'
-                  'word-break:break-word;">Reason: ' + _esc(obs.error) + '</div>')
-            m('<div class="hs-cap" style="margin:2px 0 2px;">The forecast physics still '
-              'runs on safe fallback values — tap “Refresh now” to retry the live feed.</div>')
+            # Never the word "fallback": in this state the console withholds
+            # every number, so claiming the physics "runs on fallback values"
+            # was both alarming and untrue. A cold first paint is a loading
+            # state (see _live_connecting); only a miss that outlives it is a
+            # failure.
+            if _live_connecting():
+                m('<span class="hs-badge hs-badge--watch"><span class="hs-dot"></span>'
+                  'Connecting to the live feed…</span>')
+                m('<div class="hs-cap" style="margin:4px 0 2px;">The first reading '
+                  'is being fetched from your own connection, not this server. The '
+                  'console opens as soon as it lands — usually a few seconds.</div>')
+            else:
+                m('<span class="hs-badge hs-badge--warning"><span class="hs-dot"></span>'
+                  'Live data unavailable</span>')
+                if obs.error:
+                    m('<div class="hs-cap" style="color:var(--warning);margin:4px 0 2px;'
+                      'word-break:break-word;">Reason: ' + _esc(obs.error) + '</div>')
+                m('<div class="hs-cap" style="margin:2px 0 2px;">No numbers are shown '
+                  'while the feed is down — nothing is estimated in its place. Tap '
+                  '“Refresh now” to retry.</div>')
         # basin-local observation time, the same base the engine clock uses
         _when = _live_base_time(obs).strftime("%H:%M:%S") if obs.fetched_at else "—"
         _age = " · cached" if (obs.ok and obs.stale) else ""
@@ -1273,49 +1392,109 @@ def render_farmer(s, d, place=None):
     with col_r:
         m(h2("Evaporative stress", "How thirsty the air is vs. what soil can give"))
         if HAS_PLOTLY:
+            # Bands are the engine's own drought thresholds, verbatim:
+            # hydro_engine escalates at esp < 10 (critical), < 30 (warning),
+            # < 50 (watch). The ticks land on those boundaries and nowhere else,
+            # so the dial reads as the model's decision boundaries rather than
+            # as decorative shading. 50 is the climatological median by
+            # construction, which is what the delta is measured against.
             fig = go.Figure(go.Indicator(
-                mode="gauge+number",
+                mode="gauge+number+delta",
                 value=s.esp,
-                number={"suffix": "th %ile", "font": {"size": 30, "color": C["brand"]}},
+                number={"suffix": "th %ile", "font": {"size": 30, "color": C["brand"]},
+                        "valueformat": ".1f"},
+                delta={"reference": 50.0, "valueformat": "+.1f",
+                       "increasing": {"color": C["safe"]},
+                       "decreasing": {"color": C["critical"]},
+                       "font": {"size": 13}},
                 gauge={
-                    "axis": {"range": [0, 100], "tickvals": [0, 25, 50, 75, 100]},
+                    "axis": {"range": [0, 100], "tickvals": [0, 10, 30, 50, 100],
+                             "ticksuffix": "", "tickfont": {"size": 10}},
                     "bar": {"color": C["drought"], "thickness": 0.28},
                     "borderwidth": 0,
                     "steps": [
-                        {"range": [0, 10], "color": "#F4D7C2"},
-                        {"range": [10, 30], "color": "#FBEBDF"},
-                        {"range": [30, 100], "color": "#EAF3EE"},
+                        {"range": [0, 10], "color": SEV_TINT["critical"]},
+                        {"range": [10, 30], "color": SEV_TINT["warning"]},
+                        {"range": [30, 50], "color": SEV_TINT["watch"]},
+                        {"range": [50, 100], "color": SEV_TINT["safe"]},
                     ],
                     "threshold": {"line": {"color": C["critical"], "width": 3},
                                   "thickness": 0.8, "value": 10},
                 },
             ))
             st.plotly_chart(style_fig(fig, 210), width="stretch",
-                            config={"displayModeBar": False})
+                            config={"displayModeBar": False, "responsive": True})
         else:
-            chart_placeholder("Evaporative Stress Percentile gauge")
-        m('<div class="hs-cap">Evaporative Stress Percentile (ESP). Below the red mark = flash-drought onset.</div>')
+            chart_placeholder("Evaporative Stress Percentile gauge", 210)
+        m(f'<div class="hs-cap">Evaporative Stress Percentile (ESP) — today\'s ET/PET '
+          f'stress placed on the historical distribution (ESR now {s.esr:.2f} against a '
+          f'climatology of {H.ESR_CLIM_MU:.2f}±{H.ESR_CLIM_SD:.2f}). Bands: '
+          f'&lt;10 critical · &lt;30 warning · &lt;50 watch. Delta is measured against the '
+          f'50th-percentile median.</div>')
 
         st.write("")
-        m(h2("Root-zone moisture", "Since the event began"))
-        if HAS_PLOTLY and s.sm_series.size:
-            rel_days = (s.sm_days - s.sm_days.max()).tolist()      # today = 0
+        # The x-axis resolution differs by mode: demo walks whole days from the
+        # event start, live samples hourly over the past 48 h. Say which, rather
+        # than letting an unlabelled axis imply the wrong horizon.
+        _has_sm = bool(s.sm_days.size and s.sm_series.size)
+        _rel = (s.sm_days - s.sm_days.max()) if _has_sm else None
+        _span = float(abs(_rel.min())) if _has_sm else 0.0
+        m(h2("Root-zone moisture",
+             f"Past {_span:.0f} days, hourly" if _span <= 3
+             else f"Since the event began · {_span:.0f} days"))
+        if HAS_PLOTLY and _has_sm:
+            rel_days = _rel.tolist()                                # today = 0
             soil = s.sm_series.tolist()
             fig2 = go.Figure()
+            # observed / simulated drying curve
             fig2.add_trace(go.Scatter(
-                x=rel_days, y=soil, mode="lines", line=dict(color=C["drought"], width=2.5),
-                fill="tozeroy", fillcolor="rgba(178,106,46,.10)"))
+                x=rel_days, y=soil, mode="lines+markers", name="Root-zone θ",
+                line=dict(color=C["drought"], width=2.5),
+                marker=dict(size=4, color=C["drought"]),
+                fill="tozeroy", fillcolor=_rgba_css(C["drought"], 0.10),
+                hovertemplate="θ %{y:.3f} m³/m³<br>%{x:+.2f} d from now"
+                              "<extra></extra>"))
+            # forward projection to the wilting point at the current drying rate
+            if math.isfinite(s.days_to_wilting) and s.days_to_wilting > 0:
+                fig2.add_trace(go.Scatter(
+                    x=[0.0, s.days_to_wilting], y=[s.soil_moisture, H.THETA_WP],
+                    mode="lines", name="Projected at current drying rate",
+                    line=dict(color=C["critical"], width=2, dash="dot"),
+                    hovertemplate="projected θ %{y:.3f} m³/m³<br>"
+                                  "%{x:+.1f} d from now<extra></extra>"))
+                fig2.add_annotation(
+                    x=s.days_to_wilting, y=H.THETA_WP, text=f"wilting in {s.days_to_wilting:.1f} d",
+                    showarrow=True, arrowhead=0, arrowwidth=1,
+                    arrowcolor=C["critical"], ax=-6, ay=-26,
+                    font=dict(size=10, color=C["critical"]))
+            fig2.add_hline(y=H.THETA_FC, line=dict(color=C["teal"], width=1.3, dash="dash"),
+                           annotation_text=f"Field capacity {H.THETA_FC:.2f}",
+                           annotation_position="top right", annotation_font_size=10)
             fig2.add_hline(y=H.THETA_WP, line=dict(color=C["critical"], width=1.5, dash="dash"),
-                           annotation_text="Wilting point", annotation_position="bottom right",
+                           annotation_text=f"Wilting point {H.THETA_WP:.2f}",
+                           annotation_position="bottom right",
                            annotation_font_size=10)
-            fig2.update_layout(yaxis=dict(range=[0, 0.4], title=None, gridcolor=C["line"]),
-                               xaxis=dict(title="days ago → today", gridcolor="rgba(0,0,0,0)"))
-            st.plotly_chart(style_fig(fig2, 200), width="stretch",
-                            config={"displayModeBar": False})
+            fig2.add_vline(x=0.0, line=dict(color=C["muted"], width=1, dash="dot"))
+            fig2.update_layout(
+                yaxis=dict(range=[0, max(0.40, H.THETA_FC + 0.06)],
+                           title="θ  (m³/m³)", gridcolor=C["line"],
+                           tickformat=".2f", zeroline=False),
+                xaxis=dict(title="days from now  (negative = past)",
+                           gridcolor="rgba(0,0,0,0)", ticksuffix=" d",
+                           zeroline=False))
+            st.plotly_chart(style_fig(fig2, 215, legend=True), width="stretch",
+                            config={"displayModeBar": False, "responsive": True})
         else:
-            chart_placeholder("Root-zone moisture trend")
-        m(f'<div class="hs-cap">Moisture now at {s.soil_moisture:.2f} m³/m³ '
-          f'(wilting point {H.THETA_WP:.2f}).</div>')
+            chart_placeholder("Root-zone moisture trend", 215)
+        _wilt_txt = (f"wilting projected in {s.days_to_wilting:.1f} days at the current "
+                     f"drying rate of {s.et_actual:.2f} mm/day"
+                     if math.isfinite(s.days_to_wilting)
+                     else "no wilting projected at the current drying rate")
+        m(f'<div class="hs-cap">Moisture now at {s.soil_moisture:.3f} m³/m³ '
+          f'(field capacity {H.THETA_FC:.2f}, wilting point {H.THETA_WP:.2f}) — '
+          f'{_wilt_txt}. Projection is a straight-line extrapolation of today\'s '
+          f'actual evapotranspiration over a {H.ROOT_DEPTH_MM:.0f} mm root zone, '
+          f'not a forecast model.</div>')
 
 
 # ---------------------------------------------------------------------------
@@ -1368,60 +1547,120 @@ def render_dam(s, d, place=None):
     with col_r:
         m(h2("Reservoir storage", "How full the dam is now"))
         if HAS_PLOTLY:
+            # Reference lines come from the engine, not from round numbers.
+            # The FIRO ceiling is the storage above which the forecast surcharge
+            # volume no longer fits in the remaining void; spill is the engine's
+            # real condition, storage >= RES_CAP_AFT, i.e. 100 %.
+            firo_ceiling = max(0.0, min(100.0, 100.0 * (
+                H.RES_CAP_AFT - s.target_buffer_aft) / H.RES_CAP_AFT))
             fig = go.Figure(go.Indicator(
-                mode="gauge+number",
+                mode="gauge+number+delta",
                 value=round(s.reservoir_pct, 1),
-                number={"suffix": "%", "font": {"size": 30, "color": C["brand"]}},
+                number={"suffix": "%", "font": {"size": 30, "color": C["brand"]},
+                        "valueformat": ".1f"},
+                # what the pre-release actually bought, against storage at event start
+                delta={"reference": round(s.start_frac * 100.0, 1),
+                       "valueformat": "+.1f", "suffix": " pt",
+                       "increasing": {"color": C["critical"]},
+                       "decreasing": {"color": C["safe"]},
+                       "font": {"size": 13}},
                 gauge={
-                    "axis": {"range": [0, 100]},
+                    "axis": {"range": [0, 100],
+                             "tickvals": sorted({0, 50, round(firo_ceiling), 100}),
+                             "ticksuffix": "%", "tickfont": {"size": 10}},
                     "bar": {"color": C["flood"], "thickness": 0.28},
                     "borderwidth": 0,
                     "steps": [
-                        {"range": [0, 70], "color": "#E7F1EA"},
-                        {"range": [70, 88], "color": "#FBF2D8"},
-                        {"range": [88, 100], "color": "#F7DAD6"},
+                        {"range": [0, firo_ceiling], "color": SEV_TINT["safe"]},
+                        {"range": [firo_ceiling, 100], "color": SEV_TINT["warning"]},
                     ],
                     "threshold": {"line": {"color": C["critical"], "width": 3},
-                                  "thickness": 0.8, "value": 90},
+                                  "thickness": 0.85, "value": 100},
                 },
             ))
-            st.plotly_chart(style_fig(fig, 210), width="stretch",
-                            config={"displayModeBar": False})
+            st.plotly_chart(style_fig(fig, 215), width="stretch",
+                            config={"displayModeBar": False, "responsive": True})
         else:
-            chart_placeholder("Reservoir storage gauge")
-        m(f'<div class="hs-cap">Storage at {s.reservoir_level:.1f} m. '
-          'Red mark = spillway threshold; pre-release keeps a safe gap.</div>')
+            chart_placeholder("Reservoir storage gauge", 215)
+        m(f'<div class="hs-cap">Level {s.reservoir_level:.1f} m · storage '
+          f'{s.storage_aft:,.0f} of {H.RES_CAP_AFT:,.0f} acre-ft · void now '
+          f'{s.buffer_now_aft:,.0f} acre-ft against a forecast surcharge of '
+          f'{s.target_buffer_aft:,.0f}. The amber band begins where that surcharge '
+          f'would no longer fit; the red mark is the spill condition at full '
+          f'capacity. Delta is measured against storage at event start '
+          f'({s.start_frac * 100:.0f}%).</div>')
 
         st.write("")
-        m(h2("Inflow forecast", "Next 6 hours"))
-        if HAS_PLOTLY:
+        m(h2("Inflow vs. release", "Next 6 hours · 15-minute steps"))
+        if HAS_PLOTLY and s.fc_hours.size and s.fc_inflow.size:
             hrs = s.fc_hours.tolist()
             inflow = s.fc_inflow.tolist()
+            # the surcharge the operator has to absorb: inflow above safe channel
+            clipped = [max(q, H.SAFE_CHANNEL) for q in inflow]
             fig2 = go.Figure()
+            # --- surcharge band (drawn first, so the data lines sit on top) ---
             fig2.add_trace(go.Scatter(
-                x=hrs, y=inflow, mode="lines",
+                x=hrs, y=[H.SAFE_CHANNEL] * len(hrs), mode="lines",
+                line=dict(width=0), hoverinfo="skip", showlegend=False))
+            fig2.add_trace(go.Scatter(
+                x=hrs, y=clipped, mode="lines", line=dict(width=0),
+                fill="tonexty", fillcolor=_rgba_css(C["critical"], 0.13),
+                hoverinfo="skip", name="Surcharge above safe channel"))
+            # --- inflow forecast ---
+            fig2.add_trace(go.Scatter(
+                x=hrs, y=inflow, mode="lines", name="Forecast inflow",
                 line=dict(color=C["flood"], width=2.5),
-                fill="tozeroy", fillcolor="rgba(31,95,176,.08)"))
-            fig2.add_hline(y=H.SAFE_CHANNEL, line=dict(color=C["warning"], width=1.3, dash="dash"),
-                           annotation_text="safe channel", annotation_position="top right",
-                           annotation_font_size=10)
-            fig2.add_vline(x=0, line=dict(color=C["teal"], width=1.5, dash="dot"),
-                           annotation_text="now", annotation_position="top left",
-                           annotation_font_size=10)
-            fig2.update_layout(yaxis=dict(title="m³/s", gridcolor=C["line"]),
-                               xaxis=dict(title="hours from now", gridcolor="rgba(0,0,0,0)"))
-            st.plotly_chart(style_fig(fig2, 200), width="stretch",
-                            config={"displayModeBar": False})
+                fill="tozeroy", fillcolor=_rgba_css(C["flood"], 0.08),
+                hovertemplate="inflow %{y:,.0f} m³/s<extra></extra>"))
+            # --- the release the engine recommends holding through the event ---
+            fig2.add_trace(go.Scatter(
+                x=hrs, y=[s.firo_release] * len(hrs), mode="lines",
+                name=f"Recommended release {s.firo_release:,.0f} m³/s",
+                line=dict(color=C["teal"], width=2, dash="dash"),
+                hovertemplate="release %{y:,.0f} m³/s<extra></extra>"))
+            # --- the peak, marked on the chart instead of only in prose ---
+            if s.inflow_peak > 0:
+                fig2.add_trace(go.Scatter(
+                    x=[s.inflow_peak_in_h], y=[s.inflow_peak], mode="markers",
+                    name="Forecast peak",
+                    marker=dict(color=C["flood"], size=10, symbol="diamond",
+                                line=dict(color="white", width=1.5)),
+                    hovertemplate=f"peak {s.inflow_peak:,.0f} m³/s in "
+                                  f"{s.inflow_peak_in_h:.1f} h<extra></extra>"))
+                fig2.add_annotation(
+                    x=s.inflow_peak_in_h, y=s.inflow_peak,
+                    text=f"peak {s.inflow_peak:,.0f} m³/s @ {s.inflow_peak_in_h:.1f} h",
+                    showarrow=True, arrowhead=0, arrowwidth=1,
+                    arrowcolor=C["flood"], ax=0, ay=-24,
+                    font=dict(size=10, color=C["brand"]))
+            # --- the two thresholds the alarm is actually keyed to ---
+            fig2.add_hline(y=H.SAFE_CHANNEL,
+                           line=dict(color=C["warning"], width=1.3, dash="dash"),
+                           annotation_text=f"Safe channel {H.SAFE_CHANNEL:,.0f} m³/s",
+                           annotation_position="bottom right", annotation_font_size=10)
+            fig2.add_hline(y=H.LEVEE_Q,
+                           line=dict(color=C["critical"], width=1.5, dash="dash"),
+                           annotation_text=f"Levee crest {H.LEVEE_Q:,.0f} m³/s",
+                           annotation_position="top right", annotation_font_size=10)
+            fig2.update_layout(
+                yaxis=dict(title="discharge  (m³/s)", gridcolor=C["line"],
+                           rangemode="tozero", zeroline=False),
+                xaxis=dict(title="hours from now", gridcolor="rgba(0,0,0,0)",
+                           dtick=1, ticksuffix=" h", zeroline=False))
+            st.plotly_chart(style_fig(fig2, 255, legend=True), width="stretch",
+                            config={"displayModeBar": False, "responsive": True})
         else:
-            chart_placeholder("Inflow forecast")
+            chart_placeholder("Inflow forecast", 255)
         if s.inflow_peak_in_h > 0.2:
-            cap = (f"Predicted inflow peaks at {s.inflow_peak:.0f} m³/s in about "
+            cap = (f"Predicted inflow peaks at {s.inflow_peak:,.0f} m³/s in about "
                    f"{s.inflow_peak_in_h:.1f} hours.")
         elif s.inflow_peak > H.SAFE_CHANNEL:
-            cap = f"Inflow near its crest of {s.inflow_peak:.0f} m³/s and beginning to recede."
+            cap = f"Inflow near its crest of {s.inflow_peak:,.0f} m³/s and beginning to recede."
         else:
-            cap = f"Inflow steady near baseline ({s.inflow_now:.0f} m³/s)."
-        m(f'<div class="hs-cap">{cap}</div>')
+            cap = f"Inflow steady near baseline ({s.inflow_now:,.0f} m³/s)."
+        m(f'<div class="hs-cap">{cap} The shaded wedge is the volume above safe '
+          f'channel capacity that storage has to absorb; downstream flow is now '
+          f'{s.q_downstream:,.0f} m³/s against a levee crest of {H.LEVEE_Q:,.0f}.</div>')
 
 
 # ---------------------------------------------------------------------------
@@ -1434,13 +1673,7 @@ def render_disaster(s, d, place=None):
     pl = place or H.DEMO_PLACE          # zones/shelter labels come from the Place
 
     def _sev_for(mins):
-        if not math.isfinite(mins):
-            return "safe"
-        if mins <= 100:
-            return "critical"
-        if mins <= 180:
-            return "warning"
-        return "watch"
+        return _tto_sev(mins)        # shared with the evacuation map — see _tto_sev
 
     def _tbadge(mins):
         if not math.isfinite(mins):
@@ -1929,19 +2162,27 @@ def render_dashboard():
             obs = _get_live_current()
 
         if obs is not None and obs.ok:
+            was_cold = not ss.get("_live_ever_ok")
             ss["_live_ever_ok"] = True
             ss["_live_tries"] = 0
+            ss["_live_misses"] = 0
+            if was_cold:
+                # This is a FRAGMENT rerun, so it repaints the dashboard only —
+                # the sidebar badge and the footer are at script scope and would
+                # keep saying "connecting"/"waiting" behind a working console.
+                # That contradiction is what made a healed page still look
+                # broken until the visitor pressed refresh themselves. One full
+                # rerun fixes it, costs no network (the reading is already in
+                # session state / the module cache), and happens once per visit.
+                _safe_rerun()
         elif first_load:
-            # A cloud host's own Open-Meteo call is routinely 429'd on its shared
-            # datacentre IP, while the visitor's in-browser fetch — still in
-            # flight on this very first render — succeeds a beat later. So the
-            # first miss is reported as "connecting", and only a miss that
-            # survives a refresh cycle is reported as "unreachable". Both
-            # withhold every number; the difference is only which is true.
-            tries = ss.get("_live_tries", 0) + 1
-            ss["_live_tries"] = tries
-            _render_live_unreachable(
-                obs, connecting=(tries <= 1 and USE_BROWSER_LIVE and HAS_JS_EVAL))
+            # Both shades withhold every number; the difference is only which
+            # statement is true. See _live_connecting for why a first miss is
+            # reported as "connecting" rather than "unreachable".
+            misses = ss.get("_live_misses", 0) + 1
+            ss["_live_misses"] = misses
+            ss["_live_tries"] = misses
+            _render_live_unreachable(obs, connecting=_live_connecting(misses))
             return
 
         # LIVE clock origin = the real observation time (never BASE_TIME).
@@ -1983,7 +2224,12 @@ def render_dashboard():
 # the panel; the actual network fetch is throttled per basin inside live_data
 # (a good reading held ~5 min, a failed one retried after ~20 s so it self-heals).
 if ss.mode == "live":
-    _run_every = LIVE_REFRESH_SECS
+    # Until the first real reading lands, poll hard: recovery used to wait on
+    # the 60 s tick (and up to ~2 min when the two 60 s clocks were out of
+    # phase), which is long enough that a loading state reads as a dead page.
+    # This costs no extra network — live_data throttles a failed basin to one
+    # fetch per ~20 s regardless of how often the fragment reruns.
+    _run_every = LIVE_REFRESH_SECS if ss.get("_live_ever_ok") else FIRST_LOAD_POLL_SECS
 else:
     _run_every = ss.interval if (ss.live and ss.tick < H.TICKS_MAX) else None
 
