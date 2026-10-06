@@ -136,7 +136,7 @@ Five tabs, each written for a non-technical reader first:
 | **Farmer advisory** | Farmers | Flash-drought warning, evaporative-stress gauge, root-zone moisture trend, the Marathi/English SMS |
 | **Reservoir operations** | Dam operators | FIRO pre-release directive, storage gauge, inflow forecast, live gate schedule |
 | **Disaster response** | Civic teams | Geofenced evacuation directive, affected-zone table, map placeholder |
-| **Model & validation** | Judges / reviewers | The two layers side by side, how it compares, the validation scorecard, and the optional plain-language briefing |
+| **AI analyst** | Judges / reviewers | A question box answered from the state the page just computed, the fields it read, the harness that checked the answer, the briefing layer's spend — and the engine's validation evidence one expander down |
 
 ---
 
@@ -179,8 +179,9 @@ attempt — full 2D inundation mapping and learned error correction: a **PINN**
 flood-map surrogate, an **MC-LSTM-PET** drought forecaster and **Errorcastnet**
 bias correction. None of it executes to render the console.
 
-The **language track** is the **Nugen** briefing layer, and it does run — on every
-update, in the product. It is described in full below.
+The **language track** is the **Nugen** layer, and it does run — on every update, in
+the product. It writes the per-role briefings and it answers an operator's questions,
+and in neither job does it produce a number. It is described in full below.
 
 The headline **~82.9 s** figure belongs to the research track: it is the PINN
 surrogate's benchmark for producing a 2D depth map, against **~2.3 h** for an
@@ -203,15 +204,30 @@ wants gate settings, the farmer wants to know whether to irrigate, and the disas
 officer wants to know who to move and when. Every role tab therefore carries a
 **Nugen briefing** ([`nugen_client.py`](nugen_client.py)) beneath its directive card:
 the same decision the rule engine already made, re-worded for the reader that tab is
-for. The model is `qwen-v2p5-0p5b-instruct`, served by Nugen.
+for. The same layer also answers questions on the AI analyst tab — still only from
+numbers the engine computed, and still never computing one. See
+**[Asking the console a question](#asking-the-console-a-question)**.
 
 The boundary is the whole design. The layer is handed the numbers Layer 1 computed
 and instructed to use nothing else; every figure it prints is checked back against
 the computed state and anything unsupported is flagged on the card itself. It cannot
 reach the physics engine, the directive cards remain the authoritative wording, and
-**the console renders identically with the layer switched off** — a 0.5B model is a
-good writer and a bad hydrologist, so it is given the writing and kept away from the
+**the console renders identically with the layer switched off** — a language model is
+a good writer and a bad hydrologist, so it is given the writing and kept away from the
 hydrology.
+
+**Two models, read from the account's own catalogue.** The endpoint addresses a base
+model by its *exact* Hugging Face id; a vendor-style alias (`qwen-v2p5-0p5b-instruct`)
+is answered with a 404, which is how this layer broke once. The documented default is
+therefore `Qwen/Qwen2.5-0.5B-Instruct`, and `resolve_models()` reads
+`GET /api/v3/models/base?inference_ready=true&type=text-generation` once per process
+and picks from what this account can actually call: the **smallest** instruct model for
+the role briefings, which are a paraphrase, and the **largest** one under a 34B ceiling
+for the analyst, which has to understand a question rather than re-word a sentence.
+Both fall back to the default, so an unreachable or empty catalogue costs nothing but
+the larger model. That listing is not an inference request and is not charged against
+the call budget, and a 404 naming the model buys one catalogue re-read and one retry —
+no more, so a genuinely missing model cannot turn every request into two.
 
 ```bash
 export NUGEN_API_KEY="your-key"     # or .streamlit/secrets.toml (gitignored)
@@ -227,16 +243,72 @@ has to be cheap by construction rather than by good intentions:
 | --- | --- |
 | Digest-keyed cache | One distinct situation costs at most one call per role, however many times the page re-renders |
 | No wall clock in the digest, every reading rounded | Ordinary feed jitter (31.4 → 31.5 mm/hr) is not mistaken for news and re-billed |
-| `AUTO_CALL_BUDGET` below `CALL_BUDGET` | Automatic briefings cannot consume the session; a deliberate one is always available |
+| `AUTO_CALL_BUDGET` (18) below `CALL_BUDGET` (60) | Automatic briefings cannot consume the session; the headroom is what a deliberate briefing and the interactive analyst answer out of |
 | Demo mode never auto-fires | 33 scripted ticks at a 2 s refresh would drain a budget in under a minute and say nothing new |
 | Background thread, never inline | A 30 s read timeout cannot freeze the console on the updates that matter |
-| 500-token hard cap, 150 per role briefing | Bounded cost per call |
+| 500-token hard cap — 150 per role briefing, 300 per analyst answer | Bounded cost per call |
 
-The **Model & validation** tab is the layer's audit surface: the exact prompt sent for
-every role, the calls actually spent against the allowance, and the figure check.
-`verify_app.py` test I asserts this policy against a stubbed transport — no key means
-no call, the demo never fetches, and three live renders of an unchanged basin spend
-three calls, not nine.
+The **AI analyst** tab is the layer's audit surface: the exact prompt sent for every
+role, the exact prompt sent for a question, the calls actually spent against the
+allowance, and the figure check. `verify_app.py` test I asserts this policy against a
+stubbed transport — no key means no call, the demo never fetches, and three live
+renders of an unchanged basin spend three calls, not nine.
+
+### Asking the console a question
+
+The analyst is that same layer doing a second job, and it is the one job where a
+language model could do real damage. Asked *"how long until the levee goes under?"*
+with the whole console in its context, a model answers fluently and sometimes wrongly,
+and a wrong number in a flood warning is the worst output this project can produce. So
+the model is never the thing that reads the data. The question box on tab 5 runs six
+stages, and the tab prints what each one did with your question as an **AI harness**
+table:
+
+| Stage | What it does |
+| --- | --- |
+| **Scope** | The question is matched against the topics this console actually holds. No match means no model call: the honest answer is *"this console does not hold that"*, which costs nothing and cannot be wrong |
+| **Retrieve** | The matched topics select state fields **by name** — ordinary attribute lookup, exact by construction. The fields read are shown to the operator in an evidence table |
+| **Ground** | A rule-built answer is composed from those fields **before any model runs**. This is the answer of record |
+| **Generate** | Nugen is handed the question and those fields, and nothing else |
+| **Verify** | Every figure in the reply is checked back against the retrieved facts |
+| **Fall back** | A failed, degenerate or unverified reply is discarded and the computed answer stands |
+
+Grounding before generating is what makes the accuracy claim true rather than hopeful:
+the figure the operator reads was computed by the engine and selected by name, and the
+model's only job is the English around it. A second button answers from the data alone
+with no model call at all, and that is also what a missing key looks like — the
+computed answer appears either way, and the model's absence is reported as a stage
+outcome rather than as an error.
+
+A field can only reach the analyst by appearing in the registry in
+[`nugen_client.py`](nugen_client.py), so that one tuple is the whole retrieval surface:
+there is no path from a question to a value that does not pass through it. Two details
+in it were learned the hard way. Keyword matching is on word boundaries rather than
+bare substrings, because `gate` inside *irri-gate* quietly routed every farmer question
+through the reservoir-release fields. And retrieved fields are **ranked** by how many
+of the question's topics they cover before the list is truncated, because registry
+order once pushed time-to-overtopping off the end of the sheet for *"how long until the
+levee overtops"* — the one field the question was about.
+
+The validation evidence that used to be this tab is all still here, one level down in
+an **Engine validation** expander: the mass-balance proof, the determinism
+byte-compare, the runtime spread, the rule audit trail, the rainfall sensitivity sweep
+and the labelled reference constants.
+
+### How it compares to conventional processing
+
+The tab closes with a five-row comparison against conventional 2D modelling — time to
+a decision, what it runs on, re-running it, what comes out, and the language layer. It
+is deliberately not a tab of its own: a comparison is a closing remark, not a finding.
+
+Only the first row needs care, and the table says so on screen. The left-hand figure is
+this engine's own `perf_counter()` reading for the update on display; **~2.3 h is a
+published benchmark for an equivalent HEC-RAS 2D run, not something measured here.**
+The two solve different-sized problems: the closed-form chain answers *how high, how
+soon, who is exposed* and finishes in milliseconds, while a 2D solver produces a full
+inundation surface this engine does not attempt. The honest claim is not that
+HydroSentry is a faster 2D model — it is that the decision a control room needs does
+not require one.
 
 ---
 
@@ -271,7 +343,7 @@ PCCOE HYDRO/
 ├── app.py                 # the dashboard (Streamlit, organised by tab)
 ├── hydro_engine.py        # the physics + statistics engine (demo + live)
 ├── live_data.py           # real-time basin fetch (Open-Meteo, pluggable)
-├── nugen_client.py        # Nugen language layer: per-role briefings (needs a key)
+├── nugen_client.py        # Nugen layer: role briefings + grounded analyst (needs a key)
 ├── verify_demo_golden.py  # regression guard: demo output must stay byte-identical
 ├── verify_fixes.py        # acceptance checks: clock, directives, zones, timing
 ├── verify_app.py          # Streamlit AppTest checks (modes, failure path, briefing layer)

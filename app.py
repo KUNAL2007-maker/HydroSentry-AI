@@ -1755,7 +1755,11 @@ def render_disaster(s, d, place=None):
 
 
 # ---------------------------------------------------------------------------
-# TAB 5 — MODEL & VALIDATION  (for judges / technical reviewers)
+# TAB 5 — AI SUPPORT & ANALYST
+#
+# Ask the console a question and it answers from the state it just computed.
+# The engine-validation evidence that used to fill this tab is still here, one
+# expander down, and the HydroSentry-vs-conventional comparison closes the page.
 # ---------------------------------------------------------------------------
 def _mass_balance(s) -> dict:
     """Close the books on the engine's own reservoir recurrence.
@@ -1862,9 +1866,264 @@ def _drought_rule(s) -> tuple:
     return ("esp", f"{s.esp:.1f}", "&ge; 50", "safe")
 
 
-def render_model(s, d):
-    m(h2("Model &amp; validation",
-         "What ran, what was measured, and what is only a reference"))
+def render_analyst(s, d):
+    """Tab 5 — ask the console a question, and show how the answer was made.
+
+    The ordering on screen is the ordering of trust, the same convention the
+    role tabs use: the answer first, then the fields it was read from, then the
+    harness that decided whether the language model's wording was allowed to
+    stand at all. The engine-validation evidence sits one expander down and the
+    comparison with conventional processing closes the page.
+    """
+    m(h2("AI support &amp; analyst",
+         "Ask a question — it is answered from the state this page just computed"))
+    m(note("Ask in plain English and the console answers from its own numbers. "
+           "The question first selects fields <b>by name</b> off the computed "
+           "state; an answer is then built from those fields <b>by rule</b>, "
+           "before any model runs; and only then is the Nugen model handed the "
+           "question and those same fields and asked to say it in sentences. "
+           "Every figure in its reply is checked back against the fields that "
+           "were retrieved, and a reply quoting anything else is withheld — the "
+           "computed answer stands either way. That is why the number you read "
+           "here is the engine's, not the model's.",
+           label="How an answer is produced"))
+    st.write("")
+
+    _render_ask(s, d)
+
+    st.write("")
+    render_nugen_panel(s, d)
+
+    st.write("")
+    m(h2("Engine validation", "The measured evidence behind every number above"))
+    with st.expander("Open the engine's live self-check — mass balance, "
+                     "determinism, runtime spread, rule audit and sensitivity"):
+        _render_engine_evidence(s, d)
+
+    st.write("")
+    _render_comparison(s)
+
+
+# ---------------------------------------------------------------------------
+# The ask surface
+# ---------------------------------------------------------------------------
+# Short chip labels, full questions. The chip is a one-click demo path; the text
+# box is the real interface, and a reviewer will use it.
+_ASK_CHIPS = (
+    ("Time &amp; people at risk", nugen_client.SUGGESTED_QUESTIONS[0]),
+    ("Gate action now", nugen_client.SUGGESTED_QUESTIONS[1]),
+    ("Can storage take the peak?", nugen_client.SUGGESTED_QUESTIONS[2]),
+    ("Irrigate this week?", nugen_client.SUGGESTED_QUESTIONS[3]),
+    ("Flood situation, plainly", nugen_client.SUGGESTED_QUESTIONS[4]),
+    ("Speed &amp; accuracy", nugen_client.SUGGESTED_QUESTIONS[5]),
+)
+
+# Harness outcome -> badge colour. Green is "this step did its job"; amber is
+# "this step declined or stood something down", which is the harness working
+# and not a fault; red is a genuine failure of the layer being guarded.
+_HARNESS_SEV = {
+    "in scope": "safe", "computed": "safe", "passed": "safe",
+    "not needed": "safe", "not applicable": "safe",
+    "out of scope": "watch", "declined": "watch", "not called": "watch",
+    "not reached": "watch", "in use": "watch",
+    "failed": "critical", "unavailable": "warning",
+}
+
+
+def _harness_sev(outcome: str) -> str:
+    """Badge level for a stage outcome; an unmatched one is a model id."""
+    return _HARNESS_SEV.get(str(outcome).strip().lower(), "safe")
+
+
+def _queue_question(question: str) -> None:
+    """Chip callback: load the box and fire. Runs before the next rerun's widgets.
+
+    Setting the text box's own key here is the only way round Streamlit's
+    rule that a widget's value cannot be assigned after it has been created —
+    a callback runs at the top of the next run, before the box exists.
+    """
+    ss["ask_q"] = question
+    ss["_ask_go"] = True
+
+
+def _render_ask(s, d):
+    key = _nugen_key()
+    basin_label = _nugen_basin_label()
+
+    m('<div class="hs-cap" style="margin-bottom:6px;">Start from one of these, '
+      'or type your own:</div>')
+    for row in (_ASK_CHIPS[:3], _ASK_CHIPS[3:]):
+        for col, (label, question) in zip(st.columns(len(row)), row):
+            with col:
+                st.button(label.replace("&amp;", "&"), key=f"ask_chip_{question[:24]}",
+                          on_click=_queue_question, args=(question,),
+                          width="stretch")
+
+    st.text_input("Your question", key="ask_q",
+                  placeholder="e.g. how long until the levee overtops, and who is exposed?",
+                  label_visibility="collapsed")
+    c_go, c_raw = st.columns([1, 1])
+    with c_go:
+        go = st.button("Ask the analyst", key="ask_go", type="primary",
+                       width="stretch")
+    with c_raw:
+        raw = st.button("Answer from the data only — no model call",
+                        key="ask_raw", width="stretch")
+
+    question = (ss.get("ask_q") or "").strip()
+    fired = ss.pop("_ask_go", False)
+    if (go or raw or fired) and question:
+        with st.spinner("Reading the computed state…"):
+            ans = nugen_client.ask(s, d, question, basin_label, api_key=key,
+                                   use_model=not raw)
+        ss["_ask"] = {"sig": _nugen_sig(s), "ans": ans,
+                      "clock": getattr(s, "clock", "")}
+    elif (go or raw) and not question:
+        m('<div class="hs-cap" style="margin-top:6px;color:var(--warning);">'
+          'Type a question first, or press one of the buttons above.</div>')
+
+    data = ss.get("_ask")
+    if not data:
+        m('<div class="hs-cap" style="margin-top:8px;">Nothing has been asked '
+          'yet. Nothing is sent anywhere until you ask — and the answer is '
+          'composed from the computed state whether or not the language layer '
+          'is reachable.</div>')
+        return
+
+    ans = data["ans"]
+    stale = data.get("sig") != _nugen_sig(s)
+
+    st.write("")
+    m(f'<div class="hs-cap" style="margin-bottom:6px;">Asked: '
+      f'<b>{_esc(ans.question)}</b></div>')
+
+    # ---- the answer --------------------------------------------------------
+    if not ans.in_scope:
+        m('<div class="hs-layer hs-layer--research">'
+          '<div class="hs-layer__tag">Out of scope · nothing was sent</div>'
+          '<div class="hs-layer__h">This console does not hold that</div>'
+          '<div class="hs-layer__p">The question did not match any field this '
+          'engine computes, so no field was retrieved and no model was called. '
+          'Answering anyway would be a guess dressed as a reading, which is the '
+          'one thing a flood console must not do. Ask about the river, the '
+          'reservoir, the levee, who is exposed, the soil and the crop, the '
+          'standing orders, or the engine\'s own speed and accuracy.</div>'
+          '</div>')
+        _render_harness(ans)
+        return
+
+    if ans.verified:
+        m('<div class="hs-layer">'
+          '<div class="hs-layer__tag">Answer · verified against the retrieved data</div>'
+          f'<div class="hs-layer__p" style="font-size:14.5px;color:var(--ink);">'
+          f'{_nugen_html(ans.result.text)}</div>'
+          f'<div class="hs-cap" style="margin-top:10px;">'
+          f'{_nugen_figure_check(ans.result.unsupported)}</div>'
+          f'<div class="hs-cap" style="margin-top:4px;">Worded by '
+          f'<code>{_esc(ans.result.model or nugen_client.MODEL)}</code> from the '
+          f'{len(ans.facts)} fields below and nothing else. The computed answer '
+          f'it was written from is directly underneath.</div>'
+          '</div>')
+        m('<div class="hs-layer hs-layer--research" style="margin-top:10px;">'
+          '<div class="hs-layer__tag">Answer of record · computed, no model</div>'
+          f'<div class="hs-layer__p">{_esc(ans.grounded)}</div>'
+          '<div class="hs-cap" style="margin-top:10px;">Built from the retrieved '
+          'fields by rule before the model ran. If the two disagree, this one is '
+          'right.</div>'
+          '</div>')
+    else:
+        why = ""
+        if ans.result is not None and ans.result.unsupported:
+            why = ('The model\'s wording is withheld: it quoted '
+                   + _esc(", ".join(str(b) for b in ans.result.unsupported[:6]))
+                   + ', which is not among the fields that were retrieved.')
+        elif ans.result is not None:
+            why = ('The language layer did not answer — '
+                   + _esc(ans.result.error) + ' This answer does not need it.')
+        else:
+            why = ('The language layer was not called, by request. The answer '
+                   'below is what the console computes either way.')
+        m('<div class="hs-layer">'
+          '<div class="hs-layer__tag">Answer · computed from the retrieved data</div>'
+          f'<div class="hs-layer__p" style="font-size:14.5px;color:var(--ink);">'
+          f'{_esc(ans.grounded)}</div>'
+          f'<div class="hs-cap" style="margin-top:10px;">{why}</div>'
+          '</div>')
+
+    if stale:
+        m('<div class="hs-cap" style="margin-top:6px;color:var(--warning);">'
+          f'The basin has changed since this was asked (answered for the '
+          f'{_esc(data.get("clock") or "earlier")} update). Ask again for the '
+          'current one.</div>')
+
+    # ---- the evidence ------------------------------------------------------
+    st.write("")
+    m(h2("Evidence retrieved",
+         f"The {len(ans.facts)} fields this question selected, read by name off "
+         f"the computed state"))
+    m('<div class="hs-scroll"><table class="hs-table"><thead><tr>'
+      '<th>Field read</th><th>What it is</th><th>Value on this update</th>'
+      '</tr></thead><tbody>'
+      + "".join(
+          f'<tr><td><code>{_esc(f.field)}</code></td>'
+          f'<td>{_esc(f.label)}</td>'
+          f'<td class="num">{_esc(f.value)}</td></tr>'
+          for f in ans.facts)
+      + '</tbody></table></div>')
+    m('<div class="hs-cap" style="margin-top:6px;">Each row is an attribute of '
+      'the state object this page rendered, selected because the question '
+      'matched the topic it belongs to. This table <b>is</b> what the model was '
+      'given — the prompt below is these rows and the question, and nothing '
+      'else.</div>')
+
+    _render_harness(ans)
+
+    if ans.digest:
+        with st.expander("What was sent for this question"):
+            st.code(nugen_client.analyst_preview(s, d, ans.question,
+                                                 _nugen_basin_label()),
+                    language="text")
+            st.caption(
+                "The fixed instruction, one worked example, then the question "
+                "and the retrieved fields. No credentials, no raw observations "
+                "and no part of the dashboard beyond those fields leaves the "
+                f"app. Capped at {nugen_client.ANALYST_MAX_TOKENS} completion "
+                "tokens.")
+
+
+def _render_harness(ans):
+    """The six stages of the harness, with what each one actually did.
+
+    This is the panel that makes the claim checkable rather than stated: it
+    reports the scope decision, how many fields were read, whether the model was
+    called at all, whether its figures survived the check, and whether the
+    computed answer had to stand in. A reviewer can make it say "failed" on
+    purpose by asking something the console does not hold.
+    """
+    st.write("")
+    m(h2("AI harness", "What each stage of the pipeline did with this question"))
+    m('<div class="hs-scroll"><table class="hs-table"><thead><tr>'
+      '<th>Stage</th><th>Outcome</th><th>What happened</th>'
+      '</tr></thead><tbody>'
+      + "".join(
+          f'<tr><td><b>{_esc(name)}</b></td>'
+          f'<td>{badge(_esc(outcome), _harness_sev(outcome))}</td>'
+          f'<td>{_esc(detail)}</td></tr>'
+          for name, outcome, detail in (ans.stages or []))
+      + '</tbody></table></div>')
+    m('<div class="hs-cap" style="margin-top:6px;">The guardrails are the '
+      'product, not a disclaimer. Retrieval is ordinary attribute lookup, so '
+      'the figures cannot drift from the engine; the figure check is a '
+      'deterministic comparison against the retrieved facts; and the computed '
+      'answer is produced <i>before</i> the model is called, so there is always '
+      'something correct to fall back to. Ask about something outside the basin '
+      'to watch the scope check decline instead of guessing.</div>')
+
+
+# ---------------------------------------------------------------------------
+# Engine validation (kept from the old Model & validation tab, one level down)
+# ---------------------------------------------------------------------------
+def _render_engine_evidence(s, d):
     m(note("Two separated layers. <b>Layer 1</b> is the deterministic physics "
            "engine that produced every number on this console. <b>Layer 2</b> "
            "never produces a number: the neural surrogates and published "
@@ -1921,7 +2180,8 @@ def render_model(s, d):
         # computed numbers and writes prose, and it is never asked for one.
         m('<div class="hs-layer hs-layer--research" style="margin-top:12px;">'
           '<div class="hs-layer__tag">Layer 2 · language track · runs every update</div>'
-          f'<div class="hs-layer__h">Nugen <code>{nugen_client.MODEL}</code> — '
+          f'<div class="hs-layer__h">Nugen '
+          f'<code>{_esc(nugen_client.known_models()[0])}</code> — '
           'the briefing under each directive</div>'
           '<div class="hs-layer__p">The one Layer 2 component that is live in the '
           'product. Each role tab carries a Nugen briefing beneath its directive '
@@ -1929,7 +2189,7 @@ def render_model(s, d):
           'numbers Layer 1 computed and instructed to use nothing else; every '
           'figure it prints is checked back against the computed state, and '
           'anything unsupported is flagged on the card itself. It solves no '
-          'equation, produces no forecast and changes no value above — a 0.5B '
+          'equation, produces no forecast and changes no value above — a small '
           'model is a good writer and a bad hydrologist, so it is given the '
           'writing and kept away from the hydrology.</div>'
           '<div class="hs-cap" style="margin-top:10px;">LANGUAGE PATH — '
@@ -2105,8 +2365,49 @@ def render_model(s, d):
       'reason. The execution time, the mass-balance residual, the determinism '
       'check and the sensitivity sweep are the numbers measured live.</div>')
 
-    st.write("")
-    render_nugen_panel(s, d)
+
+# ---------------------------------------------------------------------------
+# The closing comparison — HydroSentry-AI against conventional processing
+#
+# Deliberately small, and deliberately last. It is the one claim on this page
+# that rests partly on a published figure rather than on something measured in
+# front of the reader, so it sits below the evidence rather than above it, and
+# the caption says plainly which column is measured and which is a benchmark.
+# ---------------------------------------------------------------------------
+def _render_comparison(s):
+    m(h2("HydroSentry-AI vs conventional processing",
+         "The same decision, reached two different ways"))
+    m('<div class="hs-scroll"><table class="hs-table"><thead><tr>'
+      '<th>&nbsp;</th><th>HydroSentry-AI</th><th>Conventional 2D modelling</th>'
+      '</tr></thead><tbody>'
+      f'<tr><td><b>Time to a decision</b></td>'
+      f'<td class="num">{s.real_compute_ms:.2f} ms</td>'
+      f'<td class="num">~2.3 h</td></tr>'
+      '<tr><td><b>What it runs on</b></td>'
+      '<td>One CPU core. No GPU, no model weights, no network call.</td>'
+      '<td>A workstation or cluster, with a meshed domain to prepare first.</td></tr>'
+      '<tr><td><b>Re-running it</b></td>'
+      '<td>Byte-identical — proved by re-running the chain on this update.</td>'
+      '<td>Re-meshing and re-calibration between runs.</td></tr>'
+      '<tr><td><b>What comes out</b></td>'
+      '<td>A directive per desk — farmer, duty engineer, disaster officer — '
+      'with the threshold that fired.</td>'
+      '<td>Depth and velocity grids for a hydrologist to interpret.</td></tr>'
+      '<tr><td><b>Language layer</b></td>'
+      '<td>A briefing per desk and an analyst that answers questions, every '
+      'figure checked back against the computed state.</td>'
+      '<td>None.</td></tr>'
+      '</tbody></table></div>')
+    m('<div class="hs-cap" style="margin-top:6px;">Read the first row carefully, '
+      'because it is the only one that is not like for like. The left-hand '
+      'figure is this engine\'s own <code>perf_counter()</code> reading for the '
+      'update you are looking at; <b>~2.3 h is a published benchmark for an '
+      'equivalent HEC-RAS 2D run, not something measured here</b>. The two solve '
+      'different-sized problems: the closed-form chain answers "how high, how '
+      'soon, who is exposed" and finishes in milliseconds, while a 2D solver '
+      'produces a full inundation surface this engine does not attempt. The '
+      'honest claim is not that HydroSentry is a faster 2D model — it is that '
+      'the decision a control room needs does not require one.</div>')
 
 
 # ---------------------------------------------------------------------------
@@ -2195,11 +2496,11 @@ def render_role_briefing(s, d, role: str):
     if not key:
         # One quiet line, not a warning box on all three tabs. The full
         # explanation — what this layer adds, and how to switch it on — lives in
-        # the Model & validation tab, which is where a reviewer goes for it.
+        # the AI analyst tab, which is where a reviewer goes for it.
         m('<div class="hs-cap" style="margin-top:2px;">'
           f'Nugen briefing for {_esc(cfg["label"].lower())}: layer is off, no '
           '<code>NUGEN_API_KEY</code> configured. The directive above is produced '
-          'without it — see <b>Model &amp; validation</b> for what this layer adds.'
+          'without it — see the <b>AI analyst</b> tab for what this layer adds.'
           '</div>')
         return
 
@@ -2225,7 +2526,8 @@ def render_role_briefing(s, d, role: str):
                 res = nugen_client.brief_role(s, d, role, label, api_key=key)
         else:
             m('<div class="hs-cap" style="margin-top:2px;">Re-words the directive '
-              f'above for this reader using Nugen <code>{nugen_client.MODEL}</code>. '
+              f'above for this reader using Nugen '
+              f'<code>{_esc(nugen_client.known_models()[0])}</code>. '
               'Nothing on this page depends on it.</div>')
             return
 
@@ -2259,7 +2561,8 @@ def render_role_briefing(s, d, role: str):
       f'<div class="hs-cap" style="margin-top:10px;">'
       f'{_nugen_figure_check(res.unsupported)}</div>'
       '<div class="hs-cap" style="margin-top:4px;">Re-wording of the directive '
-      f'above by <code>{nugen_client.MODEL}</code> · {cost} · this layer computes '
+      f'above by <code>{_esc(res.model or nugen_client.known_models()[0])}</code>'
+      f' · {cost} · this layer computes '
       'nothing and changes no number.</div>'
       '</div>')
 
@@ -2314,9 +2617,11 @@ def render_nugen_panel(s, d):
     with right:
         st.markdown(
             f'<div class="hs-cap" style="padding-top:8px;">Model '
-            f'<code>{nugen_client.MODEL}</code> · cap '
+            f'<code>{_esc(nugen_client.known_models()[0])}</code> · cap '
             f'{nugen_client.DEFAULT_MAX_TOKENS}/{nugen_client.MAX_TOKENS_LIMIT} tokens · '
-            f'{nugen_client.budget_left()} calls left this session.</div>',
+            f'{nugen_client.budget_left()} calls left this session.<br>'
+            f'Resolved from the account catalogue: '
+            f'{_esc(nugen_client.catalogue_note())}.</div>',
             unsafe_allow_html=True)
 
     # The layer's actual spend, not a promise about it. Role briefings come out
@@ -2542,12 +2847,12 @@ def render_dashboard():
 
     render_header(s, obs)
 
-    tab_over, tab_farm, tab_dam, tab_dis, tab_model = st.tabs([
+    tab_over, tab_farm, tab_dam, tab_dis, tab_ai = st.tabs([
         "Overview",
         "Farmer advisory",
         "Reservoir operations",
         "Disaster response",
-        "Model & validation",
+        "AI analyst",
     ])
     with tab_over:
         render_overview(s, d, place)
@@ -2557,8 +2862,8 @@ def render_dashboard():
         render_dam(s, d, place)
     with tab_dis:
         render_disaster(s, d, place)
-    with tab_model:
-        render_model(s, d)
+    with tab_ai:
+        render_analyst(s, d)
 
 
 # run_every drives auto-refresh. In demo mode it advances the scenario clock and

@@ -22,6 +22,10 @@ Two things are checked here that cannot be checked any other way:
 * **Test J** — the cloud case: the server's own feed call is refused while the
   visitor's in-browser fetch is still in flight, so the first render must say
   "fetching", and a miss that outlives that grace must still say "unreachable".
+* **Test K** — the AI analyst tab: a question is answered from the computed
+  state with no key and no network, an out-of-scope question is declined rather
+  than guessed, the harness reports every stage, and the closing speed
+  comparison still admits which of its two figures was measured here.
 
 The live feed is stubbed with a fixed observation so the run is offline and
 deterministic; the browser-side JS fetch is disabled through the app's own
