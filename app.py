@@ -1924,6 +1924,7 @@ _ASK_CHIPS = (
 _HARNESS_SEV = {
     "in scope": "safe", "computed": "safe", "passed": "safe",
     "not needed": "safe", "not applicable": "safe",
+    "0 fields": "watch",
     "out of scope": "watch", "declined": "watch", "not called": "watch",
     "not reached": "watch", "in use": "watch",
     "failed": "critical", "unavailable": "warning",
@@ -1962,6 +1963,9 @@ def _render_ask(s, d):
     st.text_input("Your question", key="ask_q",
                   placeholder="e.g. how long until the levee overtops, and who is exposed?",
                   label_visibility="collapsed")
+    m('<div class="hs-cap" style="margin:-6px 0 6px;">Typing does not send '
+      'anything — press a button below. The right-hand one answers from the '
+      'computed state alone and makes no network call at all.</div>')
     c_go, c_raw = st.columns([1, 1])
     with c_go:
         go = st.button("Ask the analyst", key="ask_go", type="primary",
@@ -2079,10 +2083,15 @@ def _render_ask(s, d):
     _render_harness(ans)
 
     if ans.digest:
-        with st.expander("What was sent for this question"):
-            st.code(nugen_client.analyst_preview(s, d, ans.question,
-                                                 _nugen_basin_label()),
-                    language="text")
+        sent = ans.result is not None
+        # The STORED digest, not a fresh one. Recomputing against the current
+        # state showed a stale answer beside a prompt that was never sent.
+        with st.expander(f'What {"was" if sent else "would be"} sent for '
+                         f'this question'):
+            st.code("\n\n".join(
+                f"[{msg['role']}]\n{msg['content']}"
+                for msg in nugen_client.build_analyst_messages(ans.digest)),
+                language="text")
             st.caption(
                 "The fixed instruction, one worked example, then the question "
                 "and the retrieved fields. No credentials, no raw observations "
@@ -2448,12 +2457,32 @@ def _nugen_basin_label() -> str:
 
 
 def _nugen_html(text: str) -> str:
-    """Escaped HTML for a model reply: bullet lines become a list."""
+    """Escaped HTML for a model reply: bullet lines become a list.
+
+    Two traps, both of which this used to fall into on text a small model
+    really does produce:
+
+    * A marker counts only when a space follows it. Testing ``ln[:1]`` made
+      ``**Time to overtop:** 45 min`` a bullet, and stripping the leading
+      asterisks left the closing pair visible on the card.
+    * A reply is not all bullets. Returning only the list dropped any lead
+      sentence — the model's actual answer vanishing from a tab whose whole
+      claim is that you can see what it said.
+    """
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
-    bullets = [ln.lstrip("-*•").strip() for ln in lines
-               if ln[:1] in ("-", "*", "•")]
+
+    def _bullet(line):
+        for mark in ("- ", "* ", "• "):
+            if line.startswith(mark):
+                return line[len(mark):].strip()
+        return None
+
+    marked = [(ln, _bullet(ln)) for ln in lines]
+    bullets = [b for _, b in marked if b]
     if len(bullets) >= 2:
-        return ('<ul class="hs-dir__actions" style="margin:0;">'
+        lead = "".join(f'<p style="margin:0 0 6px;">{_esc(ln)}</p>'
+                       for ln, b in marked if not b)
+        return (lead + '<ul class="hs-dir__actions" style="margin:0;">'
                 + "".join(f"<li>{_esc(b)}</li>" for b in bullets) + "</ul>")
     return "".join(f'<p style="margin:0 0 6px;">{_esc(ln)}</p>' for ln in lines)
 

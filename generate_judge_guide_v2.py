@@ -743,7 +743,7 @@ def build_guide_pdf(filename="HydroSentry-AI_Judge_and_NonTech_Guide.pdf"):
         "<b>Step 2 (Select Stress Scenario):</b> On the left sidebar, toggle Mode to <b>Demo</b> and select <b>Dipole crisis</b>. Say: <i>'Now let us stress-test our system against Pune\'s worst nightmare: flood in the west and drought in the east.'</i>",
         "<b>Step 3 (Press Play):</b> Check the <b>'Live simulation'</b> box or click <b>'Step'</b>. Watch the clock advance. Point out the Flood hazard card turning <b>[CRITICAL] (Red)</b> and the Drought card turning <b>[ELEVATED] (Orange)</b>.",
         "<b>Step 4 (Show Farmer & Dam Tabs):</b> Click <b>Tab 2 (Farmer advisory)</b> to show the Marathi SMS box. Next, click <b>Tab 3 (Reservoir ops)</b> to display the FIRO Gate Schedule table showing minute-by-minute gate orders.",
-        "<b>Step 5 (Show Model Trust Tab):</b> Click <b>Tab 5 (Model & validation)</b>. Highlight the <b>100x Speedup card</b> (82.9s vs 2.3h) and the <b>Physical Honesty test</b>. Conclude: <i>'This proves our system can be trusted with human lives.'</i>"
+        "<b>Step 5 (Show Model Trust Tab):</b> Click <b>Tab 5 (AI analyst)</b>. Ask it a question, then show the <b>Evidence retrieved</b> table and the <b>AI harness</b> that checks the answer, open <b>Engine validation</b> for the <b>Physical Honesty test</b>, and finish on the comparison with conventional processing. Conclude: <i>'This proves our system can be trusted with human lives.'</i>"
     ]
     story.append(make_card(None, demo_steps, bg_color=BG_BLUE_50, border_color=BORDER_TEAL, width=PRINTABLE_WIDTH, pad_v=5, pad_h=7))
 

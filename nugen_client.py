@@ -181,13 +181,20 @@ def is_configured(api_key: str | None = None) -> bool:
 # ---------------------------------------------------------------------------
 _ANALYST_MAX_B = 34.0       # above this, a 30 s read timeout is a real risk
 
+# Held across the whole catalogue read, so exactly one thread fetches and the
+# others wait and then see the resolved answer. _lock is still what guards
+# the globals themselves; this one only serialises the network round trip.
+_resolve_lock = threading.Lock()
 _models_resolved = False
 _briefing_model = MODEL
 _analyst_model = MODEL
-_catalogue: list[dict] = []
 _catalogue_note = "not read yet"
 
-_SIZE_RE = re.compile(r"([0-9]*\.?[0-9]+)\s*([BM]?)", re.I)
+# "0.49B", "7B", "560M", and the mixture-of-experts "8x7B" (= 56 B, which
+# read as 8 B and slipped under the analyst ceiling). The B/M suffix is
+# mandatory: a bare number is a size we cannot interpret, and guessing one
+# is how an unknown model gets promoted into the slot where latency matters.
+_SIZE_RE = re.compile(r"(?:([0-9]+)\s*x\s*)?([0-9]*\.?[0-9]+)\s*([BM])", re.I)
 
 
 def _params_b(entry: dict) -> float:
@@ -197,11 +204,13 @@ def _params_b(entry: dict) -> float:
     smallest and is excluded by the analyst's ceiling — an unknown model is
     never silently promoted into the slot where latency matters.
     """
-    mt = _SIZE_RE.match(str(entry.get("parameters") or "").strip())
+    mt = _SIZE_RE.search(str(entry.get("parameters") or "").strip())
     if not mt:
         return float("inf")
-    val = float(mt.group(1))
-    return val / 1000.0 if mt.group(2).upper() == "M" else val
+    val = float(mt.group(2))
+    if mt.group(3).upper() == "M":
+        val /= 1000.0
+    return val * float(mt.group(1) or 1)
 
 
 def _usable(entry: dict) -> bool:
@@ -221,11 +230,24 @@ def resolve_models(api_key: str | None = None,
     leaves both ids at ``MODEL`` and records why in ``catalogue_note``.
     """
     global _models_resolved, _briefing_model, _analyst_model
-    global _catalogue, _catalogue_note
+    global _catalogue_note
 
     with _lock:
         if _models_resolved and not force:
             return _briefing_model, _analyst_model
+
+    with _resolve_lock:
+        # Re-check inside the gate: while this thread queued, another may
+        # have done the work, and a second listing would answer the same.
+        with _lock:
+            if _models_resolved and not force:
+                return _briefing_model, _analyst_model
+        return _read_catalogue(api_key)
+
+
+def _read_catalogue(api_key: str | None) -> tuple[str, str]:
+    """The body of ``resolve_models``, run under ``_resolve_lock``."""
+    global _models_resolved, _briefing_model, _analyst_model, _catalogue_note
 
     key = (api_key or default_api_key()).strip()
     rows: list[dict] = []
@@ -244,15 +266,18 @@ def resolve_models(api_key: str | None = None,
                 note = (f"GET /models/base returned HTTP {resp.status_code} — "
                         f"falling back to {MODEL}")
             else:
-                rows = [e for e in (resp.json().get("models") or [])
+                body = resp.json()
+                listed = body.get("models") if isinstance(body, dict) else None
+                rows = [e for e in (listed or [])
                         if isinstance(e, dict) and _usable(e)]
                 note = (f"{len(rows)} inference-ready text model"
                         f"{'' if len(rows) == 1 else 's'} on this account"
                         if rows else
                         f"the catalogue listed no inference-ready text model — "
                         f"falling back to {MODEL}")
-        except (requests.RequestException, ValueError) as exc:
-            note = f"could not read the catalogue ({type(exc).__name__}) — falling back to {MODEL}"
+        except Exception as exc:        # never raise onto the render thread
+            note = (f"could not read the catalogue ({type(exc).__name__})"
+                    f" — falling back to {MODEL}")
 
     # An instruction-tuned checkpoint is required: a raw base model continues
     # text rather than following a system prompt, which would make every
@@ -265,12 +290,18 @@ def resolve_models(api_key: str | None = None,
         by_size = sorted(chat, key=_params_b)
         brief_m = str(by_size[0]["model_id"])
         fits = [e for e in by_size if _params_b(e) <= _ANALYST_MAX_B]
-        analyst_m = str((fits or by_size)[-1]["model_id"])
+        # No candidate under the ceiling: take the SMALLEST, never the
+        # largest. Falling back upwards would hand the analyst exactly the
+        # model the ceiling was written to keep out of a 30 s read timeout.
+        analyst_m = str((fits or by_size[:1])[-1]["model_id"])
+        if not fits:
+            note += (f" (none at or under {_ANALYST_MAX_B:.0f}B, so the "
+                     f"analyst uses the smallest too)")
     elif rows:
         note += " (none instruction-tuned)"
 
     with _lock:
-        _catalogue, _catalogue_note = rows, note
+        _catalogue_note = note
         _briefing_model, _analyst_model = brief_m, analyst_m
         _models_resolved = True
     return brief_m, analyst_m
@@ -631,7 +662,8 @@ def build_role_digest(state, directives, role: str, place_name: str = "") -> str
     else:                                                   # disaster
         depth = _bucket(getattr(state, "overtop_depth", None), 0.1, "{:.1f}")
         q_down = _bucket(getattr(state, "q_downstream", None), 10)
-        hh = int(getattr(state, "households_at_risk", 0) or 0)
+        hh = _bucket(getattr(state, "households_at_risk", 0) or 0, 1,
+                     dash="0")
         tto_raw = getattr(state, "time_to_overtop_min", float("inf"))
         facts = [f"Flood: {str(getattr(state, 'flood_sev', 'unknown')).upper()}."]
         if depth and float(depth) > 0:
@@ -864,8 +896,8 @@ def complete(digest: str, api_key: str | None = None,
              max_tokens: int = DEFAULT_MAX_TOKENS,
              use_cache: bool = True, role: str | None = None,
              model: str | None = None, messages: list[dict] | None = None,
-             cache_id: str | None = None,
-             strict_labels: bool = True) -> NugenResult:
+             cache_id: str | None = None, strict_labels: bool = True,
+             auto: bool = False) -> NugenResult:
     """One completion request for a block of facts. Never raises.
 
     ``max_tokens`` is clamped to ``MAX_TOKENS_LIMIT`` (500) regardless of what
@@ -879,7 +911,7 @@ def complete(digest: str, api_key: str | None = None,
     background dispatcher pin the key it already handed the UI, so a result
     cannot land under a key nobody looks up.
     """
-    global _calls_made
+    global _calls_made, _auto_calls
 
     key = (api_key or default_api_key()).strip()
     budget = max(1, min(int(max_tokens), MAX_TOKENS_LIMIT))
@@ -902,8 +934,8 @@ def complete(digest: str, api_key: str | None = None,
     # spend a call anyway — a cache hit above must not pay for a network round
     # trip. Until it lands the default id, the exact one the API's own error
     # message names, is what gets used.
-    brief_m, _ = resolve_models(key)
-    mdl = model or brief_m
+    brief_m, analyst_m = resolve_models(key)
+    mdl = model or (analyst_m if role == ANALYST_ROLE else brief_m)
 
     with _lock:
         if _calls_made >= CALL_BUDGET:
@@ -926,6 +958,12 @@ def complete(digest: str, api_key: str | None = None,
             with _lock:
                 if _calls_made < CALL_BUDGET:
                     _calls_made += 1
+                    # A retry on an automatic briefing is a second real
+                    # call and has to be charged to the same allowance, or
+                    # an endpoint that 404s doubles what the automatic path
+                    # is permitted to spend.
+                    if auto:
+                        _auto_calls += 1
                     retry_ok = True
                 else:
                     retry_ok = False
@@ -1082,7 +1120,7 @@ def request_async(digest: str, api_key: str | None = None,
         # this key in _inflight forever and the UI "preparing" for good.
         try:
             out = complete(digest, api_key=key, max_tokens=budget, role=role,
-                           cache_id=cid)
+                           cache_id=cid, auto=True)
         except Exception as exc:                            # pragma: no cover
             out = NugenResult(error=f"Briefing thread failed: {exc}",
                               max_tokens=budget)
@@ -1090,8 +1128,19 @@ def request_async(digest: str, api_key: str | None = None,
             _async_out[cid] = out
             _inflight.discard(cid)
 
-    threading.Thread(target=_work, name=f"nugen-{role or 'brief'}",
-                     daemon=True).start()
+    try:
+        threading.Thread(target=_work, name=f"nugen-{role or 'brief'}",
+                         daemon=True).start()
+    except Exception as exc:                            # thread table full
+        # Without this the key stays in _inflight for the life of the
+        # process: pending_count() never returns to zero, the UI keeps its
+        # fast refresh, and this situation reads "preparing" for ever.
+        with _lock:
+            _inflight.discard(cid)
+            _async_out[cid] = NugenResult(
+                error=f"Could not start the briefing thread: {exc}",
+                max_tokens=budget)
+        return _async_out[cid]
     return None
 
 
@@ -1140,6 +1189,11 @@ def request_role_async(state, directives, role: str, place_name: str = "",
 ANALYST_MAX_TOKENS = 300    # a few sentences, with room for a figure or four
 ANALYST_ROLE = "analyst"
 MAX_FACTS = 14              # bounds the prompt, and the operator's reading
+# The question is bounded BEFORE the facts are appended to it. complete()
+# truncates the prompt from the end, so an unbounded question would evict the
+# whole FACTS block and leave the model instructed to answer "using only the
+# FACTS given" with no facts present at all.
+QUESTION_CHAR_LIMIT = 400
 
 
 @dataclass
@@ -1150,6 +1204,8 @@ class Fact:
     value: str
     clause: str = ""        # the field as a sentence fragment, for the answer
     score: int = 0          # how many of the question's topics it covers
+    rank: int = 0           # operational salience; see _RANK
+    breadth: int = 0        # how many topics it belongs to at all
 
 
 @dataclass
@@ -1299,9 +1355,9 @@ def _int(attr: str, unit: str = ""):
 # levee overtopping is the river stays within the levee" is not English.
 _FIELDS: tuple = (
     ("flood_sev", "Flood severity", _sev("flood_sev"),
-     ("core", "flood", "levee", "people", "timing"), "{l} is {v}"),
+     ("core", "overall", "flood", "levee", "people", "timing"), "{l} is {v}"),
     ("drought_sev", "Drought severity", _sev("drought_sev"),
-     ("core", "drought", "crop", "soil"), "{l} is {v}"),
+     ("core", "overall", "drought", "crop", "soil"), "{l} is {v}"),
     ("time_to_overtop_min", "Time to levee overtopping", _tto,
      ("timing", "people", "levee", "flood"), "{v}"),
     ("households_at_risk", "Households at risk", _households,
@@ -1361,6 +1417,25 @@ _FIELDS: tuple = (
      "{l} is {v}"),
 )
 
+# Tie-break within an equal topic match: which field a duty officer reads
+# first. Breadth alone was doing this job and did it backwards — asked for the
+# drought situation, potential and actual evapotranspiration (two topics each)
+# outranked the evaporative stress percentile and days-to-wilting (four each),
+# so the answer opened on two figures nobody acts on. Salience is a judgement,
+# so it is written down once, here, where it can be argued with.
+_RANK: dict = {
+    # the two verdicts
+    "flood_sev": 0, "drought_sev": 0,
+    # what a desk acts on
+    "time_to_overtop_min": 1, "households_at_risk": 1, "inflow_peak": 1,
+    "reservoir_pct": 1, "firo_release": 1, "esp": 1, "days_to_wilting": 1,
+    "real_compute_ms": 1, "kge": 1,
+    # supporting readings fall through to _DEFAULT_RANK
+    # ambient conditions, last
+    "temp": 3, "pet": 3, "et_actual": 3, "lead_time_days": 3,
+}
+_DEFAULT_RANK = 2
+
 # The standing orders are facts too: the analyst must answer "what should the
 # duty engineer do now?" with the directive the engine issued, not with advice
 # of its own.
@@ -1382,11 +1457,18 @@ _ORDERS: tuple = (
 # irrigating); everything else must match a whole word.
 _TOPIC_WORDS: dict = {
     "flood": ("flood*", "river", "rivers", "surge", "inundat*", "overflow*",
-              "danger*", "severity", "alert", "alerts", "emergency",
-              "situation", "how bad", "status", "risk", "risks"),
+              "danger*"),
+    # Hazard-neutral words. They belong to BOTH hazards, so filing them under
+    # "flood" (as they were) answered "what is the drought situation?" with
+    # the whole flood side. Only the two severity fields carry this topic, so
+    # it anchors an answer without biasing it towards either hazard.
+    "overall": ("severity", "alert", "alerts", "emergency", "situation",
+                "how bad", "status", "risk", "risks", "overall"),
+    # "left" is deliberately absent: it made "how much storage is left" a
+    # question about time-to-overtopping. "how long", "until", "when" and
+    # "time to" already cover every temporal reading of the word.
     "timing": ("how long", "when", "time to", "minute*", "hour*", "soon",
-               "until", "left", "eta", "arrive*", "arriving", "before",
-               "deadline"),
+               "until", "eta", "arrive*", "arriving", "before", "deadline"),
     "people": ("household*", "people", "person*", "resident*", "village*",
                "evacuat*", "shelter*", "affected", "population", "public",
                "who is", "civilian*"),
@@ -1412,10 +1494,10 @@ _TOPIC_WORDS: dict = {
                "performance", "latency"),
     "accuracy": ("accurac*", "accurate", "kge", "valid*", "reliab*", "trust*",
                  "confiden*", "smap", "proven", "benchmark*", "how good"),
-    "action_dam": ("duty engineer", "engineer*", "control room", "operator*",
-                   "gate team"),
-    "action_disaster": ("disaster*", "ndrf", "rescue", "response team",
-                        "district officer"),
+    "action_dam": ("duty engineer*", "engineer*", "control room",
+                   "control-room", "operator*", "gate team*"),
+    "action_disaster": ("disaster*", "ndrf", "rescue", "response team*",
+                        "district officer*"),
     "action_farmer": ("farmer*", "grower*", "cultivator*"),
 }
 
@@ -1432,7 +1514,7 @@ _DESK_TOPICS: dict = {
 # "what do we do now" is a question about every desk.
 _ACTION_WORDS = ("what should", "what do i", "what do we", "should i",
                  "should we", "what action", "recommend", "advice", "advise",
-                 "next step", "do now", "what now", "instruction", "order",
+                 "next step", "do now", "what now", "instruction*", "order*",
                  "tell me what", "guidance")
 
 
@@ -1449,6 +1531,45 @@ def _patterns(words) -> list:
 _TOPIC_RE: dict = {topic: _patterns(words)
                    for topic, words in _TOPIC_WORDS.items()}
 _ACTION_RE: list = _patterns(_ACTION_WORDS)
+
+# Words that carry no domain content of their own.
+#
+# An action question built only from these is a question about the standing
+# orders — "what should we do now?" is a fair thing to ask a control room. An
+# action question wrapped round a noun this console has never heard of is not
+# about the basin at all. Without the distinction, the bare ``action`` topic was
+# enough to pass the scope gate, and "what should I cook for dinner?" was
+# answered with an evacuation order: the exact failure the scope step exists to
+# prevent, and a very bad look on a flood console.
+_FILLER = frozenset("""
+a about action actions advice advise an and any are as at be been being best by
+can could did do does doing done for from get give given go going good got
+guidance had has have he her him his how i if in instruction instructions into
+is it its just know let like make may me more most much must my need needs next
+now of on one only or order orders other our out over please recommend
+recommendation said say see shall she should so some step steps such take tell
+than that the their them then there these they thing things think this those to
+told too us use very want was way we well were what when where which while who
+whom why will with would you your
+""".split())
+
+
+def _off_domain_words(question: str) -> list:
+    """Content words the console has no vocabulary for at all.
+
+    A word counts as known if any topic pattern matches it — which reuses the
+    very same patterns that drive retrieval, so the vocabulary cannot drift
+    away from the fields that actually exist.
+    """
+    out = []
+    for word in re.findall(r"[a-z]+", str(question or "").lower()):
+        if len(word) < 3 or word in _FILLER:
+            continue
+        if any(pat.search(word)
+               for pats in _TOPIC_RE.values() for pat in pats):
+            continue
+        out.append(word)
+    return out
 
 SUGGESTED_QUESTIONS = (
     "How long until the levee overtops, and how many households are exposed?",
@@ -1473,7 +1594,14 @@ def _topics_for(question: str) -> list:
         if desk in found:
             found += [t for t in implied if t not in found]
     if any(p.search(q) for p in _ACTION_RE):
-        found.append("action")
+        # An action phrase on its own asks about the standing orders, and
+        # "what should we do now?" deserves an answer. An action phrase
+        # wrapped round a noun this console has never heard of does not: on
+        # its own the bare "action" topic was enough to pass the scope gate,
+        # and "what should I cook for dinner?" was answered with an
+        # evacuation order.
+        if found or not _off_domain_words(q):
+            found.append("action")
     return found
 
 
@@ -1497,6 +1625,11 @@ def retrieve(state, directives, question: str) -> tuple:
     one field the question was about. Score first, cut second.
     """
     topics = _topics_for(question)
+    if not topics:
+        # Nothing matched, so nothing is read. Returning the "core" fields
+        # here would leave an out-of-scope answer carrying two readings while
+        # its own harness row reported that nothing had been retrieved.
+        return [], topics
     asked = {t for t in topics if t != "action"}
     wanted = asked | {"core"}
     action = "action" in topics
@@ -1514,12 +1647,21 @@ def retrieve(state, directives, question: str) -> tuple:
         facts.append(Fact(
             field=attr, label=label, value=str(value),
             clause=template.format(l=_lead(label), v=value),
-            score=len(asked.intersection(field_topics))))
+            score=len(asked.intersection(field_topics)),
+            rank=_RANK.get(attr, _DEFAULT_RANK),
+            breadth=len(field_topics)))
 
-    named_desk = any(t.startswith("action_") for t in topics)
+    # Which desks the question actually reaches. Only when it reaches none of
+    # them does an action phrase mean "every desk" — "what should we do now?"
+    # is a question about all three, but "should I irrigate my field?" is a
+    # question for the farmer, and used to come back with the gate schedule
+    # and the evacuation order attached.
+    desk_hit = {role: asked.intersection(order_topics)
+                for role, _, order_topics in _ORDERS}
+    any_desk = any(desk_hit.values())
     for role, label, order_topics in _ORDERS:
-        hit = asked.intersection(order_topics)
-        if not hit and not (action and not named_desk):
+        hit = desk_hit[role]
+        if not hit and not (action and not any_desk):
             continue
         item = (directives or {}).get(role) or {}
         if not item:
@@ -1532,9 +1674,15 @@ def retrieve(state, directives, question: str) -> tuple:
         # single reading whenever one was asked for.
         facts.append(Fact(field=f"directives[{role}]", label=label,
                           value=text + ".", clause="",
-                          score=len(hit) + (3 if action else 0)))
+                          score=len(hit) + (3 if action else 0),
+                          rank=0, breadth=len(order_topics)))
 
-    facts.sort(key=lambda f: -f.score)
+    # Score first, then SPECIFICITY. Score alone left ties to be broken by
+    # registry order, which is flood-first: asked "how much storage is left",
+    # flood severity and the levee won the tie and the storage fields were cut
+    # out of the four-clause answer they were retrieved for. A field belonging
+    # to one topic is a sharper answer than a five-topic catch-all.
+    facts.sort(key=lambda f: (-f.score, f.rank, f.breadth))
     return facts[:MAX_FACTS], topics
 
 
@@ -1596,6 +1744,13 @@ _ANALYST_EXAMPLE_A = (
 )
 
 
+def _bounded(question: str) -> str:
+    """One line of question, short enough that the facts cannot be evicted."""
+    text = " ".join(str(question or "").split())
+    return (text if len(text) <= QUESTION_CHAR_LIMIT
+            else text[:QUESTION_CHAR_LIMIT].rstrip() + "...")
+
+
 def build_analyst_digest(facts: list, question: str, place_name: str = "",
                          clock: str = "") -> str:
     """The question and the retrieved facts — the entire prompt payload.
@@ -1607,8 +1762,7 @@ def build_analyst_digest(facts: list, question: str, place_name: str = "",
     head = f"Basin: {place_name or 'the basin'}."
     if clock:
         head += f" Time: {clock}."
-    lines = [f"QUESTION: {' '.join(str(question or '').split())}", "FACTS:",
-             head]
+    lines = [f"QUESTION: {_bounded(question)}", "FACTS:", head]
     lines += [f"{f.label}: {f.value}" for f in facts]
     return "\n".join(lines)
 
@@ -1641,7 +1795,7 @@ def ask(state, directives, question: str, place_name: str = "",
     whatever happened to the model, and a ``stages`` list recording what each
     step of the harness did — which is what the tab puts on screen.
     """
-    question = " ".join(str(question or "").split())
+    question = _bounded(question)
     facts, topics = retrieve(state, directives, question)
     out = Answer(question=question, topics=topics, facts=facts)
 
@@ -1665,8 +1819,12 @@ def ask(state, directives, question: str, place_name: str = "",
 
     # ---- 2. retrieve + 3. ground ----------------------------------------
     out.grounded = _grounded_answer(facts)
+    # Truncate here, not in complete(): the messages are built from this
+    # string and unsupported_numbers() verifies the reply against it, so the
+    # prompt sent and the guard applied have to be the same bytes.
     out.digest = build_analyst_digest(facts, question, place_name,
-                                      getattr(state, "clock", ""))
+                                      getattr(state, "clock", "")
+                                      )[:_PROMPT_CHAR_LIMIT]
     n_orders = len(facts) - len(readings)
     stages = [
         ("Scope check", "in scope",
@@ -1695,17 +1853,13 @@ def ask(state, directives, question: str, place_name: str = "",
         ]
         return out
 
-    # Resolve rather than read. ``known_models`` returns the unresolved defaults
-    # until ``complete`` has read the catalogue once, so the FIRST question of a
-    # process would be answered by the briefing checkpoint — the smallest one —
-    # which is precisely the question a reviewer asks first. This path is
-    # already blocking under a spinner and about to spend a 30-second POST, so
-    # one catalogue read here costs nothing anybody notices. With no key it
-    # returns the defaults without touching the network.
-    _, analyst_m = resolve_models(api_key)
+    # No model id is passed: ``complete`` resolves the catalogue itself and
+    # picks the analyst slot from ``role``. Choosing it here instead would
+    # have to read ``known_models`` before resolution has happened, which is
+    # how the first question of a process ended up on the briefing model and
+    # cached under a key the second ask never looked up.
     res = complete(out.digest, api_key=api_key, max_tokens=ANALYST_MAX_TOKENS,
                    role=ANALYST_ROLE,
-                   model=analyst_m if analyst_m != MODEL else None,
                    messages=build_analyst_messages(out.digest),
                    strict_labels=False)
     out.result = res

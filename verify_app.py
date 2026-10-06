@@ -387,19 +387,35 @@ def _stub_nugen() -> dict:
     inside the real transport, which is exactly what has been replaced. The
     automatic allowance (``auto_calls_made``) is incremented by the dispatcher
     and is therefore the one these checks read.
+
+    The signature has to track ``nugen_client.complete``'s, because a stub that
+    rejects a keyword the real one accepts raises inside the dispatcher's worker
+    thread, where the exception is caught and recorded as a briefing error — the
+    counters still move, so the de-duplication checks below would keep passing
+    while measuring nothing. ``**kwargs`` absorbs the rest of the real
+    signature (``model``, ``messages``, ``strict_labels``, ``auto``) and whatever
+    is added next.
+
+    ``cache_id`` is taken by name rather than swallowed, because it is the key
+    the result has to be filed under: ``request_async`` computes the id, hands
+    it to the UI and *pins* it on the call, and a result written anywhere else is
+    one nobody looks up. The pinned id currently equals what the stub would
+    recompute, so this is insurance rather than a live fix — but it is the kind
+    of insurance that matters here, since the failure it prevents is silent.
     """
     seen: dict = {"n": 0, "roles": []}
 
     def fake_complete(digest, api_key=None, max_tokens=0, use_cache=True,
-                      role=None):
+                      role=None, cache_id=None, **kwargs):
         seen["n"] += 1
         seen["roles"].append(role)
         out = nugen_client.NugenResult(
             ok=True, max_tokens=max_tokens,
             text="Stub briefing for the verify_app run. It prints no figures.")
+        cid = cache_id or nugen_client._cache_id(digest, max_tokens, role,
+                                                 kwargs.get("model"))
         with nugen_client._lock:
-            nugen_client._cache[
-                nugen_client._cache_id(digest, max_tokens, role)] = out
+            nugen_client._cache[cid] = out
         return out
 
     nugen_client.complete = fake_complete
@@ -526,6 +542,15 @@ def test_j() -> None:
               "Live feed unreachable" not in text)
         check("J4 it is explicit that nothing stands in for the missing reading",
               "no estimated numbers stand in for it" in text)
+        # The three strings below are the dashboard's own, and all three are
+        # still reachable by ``page_text`` on a healthy render even though
+        # "Operational Real-Time Engine Execution" now also appears inside the
+        # ``st.expander`` on the AI analyst tab. That was checked rather than
+        # assumed: AppTest's element tree recurses into expander blocks, so
+        # markdown written inside one is returned by ``at.markdown`` exactly as
+        # top-level markdown is. (Only the expander's *label* is invisible to it,
+        # being a block property and not an element.) The leak guard therefore
+        # still measures a leak; it has not gone vacuous.
         leaked = [p for p in ("Performance at a glance",
                               "Operational Real-Time Engine Execution",
                               "Real-time observations") if p in text]
@@ -546,8 +571,169 @@ def test_j() -> None:
         install_stub()
 
 
+# ---------------------------------------------------------------------------
+# TEST K — the AI analyst tab (tab 5, formerly "Model & validation")
+# ---------------------------------------------------------------------------
+#
+# Tab 5 stopped being a validation read-out and became an interface: a reviewer
+# types a question and the console answers it. That changes what can go wrong,
+# because the tab now has a language model in it and a flood console that states
+# a wrong depth or a wrong evacuation window is worse than one that says nothing.
+# The claim the tab makes on screen is that the model is never the thing that
+# reads the data — the figure is retrieved off the computed state by name, the
+# answer is composed by rule *before* any model runs, and the model only supplies
+# the English. These checks hold that claim to account at the four points where
+# it could quietly stop being true:
+#
+#   * the answer must exist without the model. There is no key in this
+#     environment and the endpoint must never be contacted, so the data-only
+#     path is the one that has to carry a real, non-empty, figure-bearing answer
+#     — and it must reach the page, not merely the session state;
+#   * a question the console does not hold must be *declined*. This is the one
+#     behaviour a fluent model will always get wrong if it is allowed to try, so
+#     the scope check has to fire before retrieval and before any call;
+#   * both paths must spend nothing. The transport is stubbed with a counter, so
+#     a zero here means the transport was never entered at all — not that the
+#     network happened to be down;
+#   * the harness must keep reporting all six stages. It is what makes the
+#     pipeline checkable instead of merely asserted, and a table that silently
+#     lost its rows would leave the claim with nothing behind it.
+#
+# The last two checks guard the closing speed comparison, and K19 in particular
+# is an honesty guard rather than a UI assertion: the "~2.3 h" column is a
+# published HEC-RAS 2D benchmark and not a measurement taken here, and the
+# caption that says so is the only thing standing between a fair comparison and
+# a 100x speedup claim the project cannot support. If that caveat is ever
+# deleted, this check is meant to fail.
+def test_k() -> None:
+    for var in ("NUGEN_API_KEY", "HYDRO_NUGEN_KEY"):
+        os.environ.pop(var, None)
+
+    real_complete = nugen_client.complete
+    _nugen_reset()
+    seen = _stub_nugen()
+    try:
+        at = fresh_app()
+        check("K1 the AI analyst tab renders with no exception", not at.exception,
+              exc_text(at))
+
+        text = page_text(at)
+        check("K2 the tab carries the analyst heading, not the old model one",
+              "AI support &amp; analyst" in text
+              and "answered from the state this page just computed" in text)
+        check("K3 it states up front how an answer is produced",
+              "How an answer is produced" in text
+              and "before any model runs" in text)
+
+        # ---- the ask surface exists as widgets ---------------------------
+        keys = widget_keys(at)
+        chips = [f"button:ask_chip_{q[:24]}"
+                 for q in nugen_client.SUGGESTED_QUESTIONS]
+        missing = [c for c in chips if c not in keys]
+        check("K4 every suggested question is offered as a chip",
+              len(chips) == 6 and not missing, f"missing {missing}")
+        check("K5 the question box and both ask buttons exist",
+              widget(at, "text_input", "ask_q") is not None
+              and "button:ask_go" in keys and "button:ask_raw" in keys,
+              str(sorted(k for k in keys if "ask" in k)))
+        check("K6 nothing is asked, and nothing sent, until the operator asks",
+              "Nothing has been asked" in text and seen["n"] == 0,
+              f"{seen['n']} call(s)")
+
+        # ---- the data-only path: an answer with no key and no model -------
+        # This is the path that has to work when the language layer is absent,
+        # which in this environment it always is.
+        at.text_input(key="ask_q").set_value(nugen_client.SUGGESTED_QUESTIONS[0])
+        at.button(key="ask_raw").click().run()
+        check("K7 asking from the data only raises nothing", not at.exception,
+              exc_text(at))
+
+        ans = (at.session_state.get("_ask") or {}).get("ans")
+        check("K8 the question was in scope and read fields off the state",
+              ans is not None and ans.in_scope and len(ans.facts) > 0,
+              f"in_scope={getattr(ans, 'in_scope', None)}, "
+              f"{len(getattr(ans, 'facts', []))} field(s)")
+
+        text = page_text(at)
+        # The app writes the answer through its own minimal HTML escape, so the
+        # same transform is applied here rather than asserting on a fragment
+        # that happens to contain no markup characters today.
+        shown = (str(getattr(ans, "grounded", "")).replace("&", "&amp;")
+                 .replace("<", "&lt;").replace(">", "&gt;"))
+        check("K9 a non-empty computed answer reaches the page",
+              len(shown) > 40 and shown in text,
+              f"grounded is {len(shown)} char(s), on page: {shown in text}")
+        check("K10 it is presented as computed, with the model not called",
+              "computed from the retrieved data" in text
+              and "The language layer was not called, by request" in text)
+        check("K11 the fields the answer was built from are shown",
+              "Evidence retrieved" in text
+              and "read by name off the computed state" in text)
+        check("K12 the data-only path contacted nothing",
+              seen["n"] == 0 and nugen_client.calls_made() == 0,
+              f"{seen['n']} stub call(s), {nugen_client.calls_made()} real")
+
+        # ---- the harness reports every stage ------------------------------
+        check("K13 the harness table renders all six stage rows",
+              "AI harness" in text
+              and all(stage in text for stage in
+                      ("Scope check", "Retrieval", "Grounded answer",
+                       "Language model", "Figure check", "Fallback")),
+              str([st_ for st_ in ("Scope check", "Retrieval",
+                                   "Grounded answer", "Language model",
+                                   "Figure check", "Fallback")
+                   if st_ not in text]))
+
+        # ---- out of scope is declined, not guessed ------------------------
+        at.text_input(key="ask_q").set_value("What is the capital of France?")
+        at.button(key="ask_raw").click().run()
+        check("K14 an out-of-scope question raises nothing", not at.exception,
+              exc_text(at))
+
+        oos = (at.session_state.get("_ask") or {}).get("ans")
+        text = page_text(at)
+        # ``facts`` is deliberately NOT asserted empty here. ``retrieve`` always
+        # includes the two "core" fields (flood_sev, drought_sev) because its
+        # wanted-set is ``topics | {"core"}``, so an out-of-scope question still
+        # comes back with those two read off the state. That is harmless and the
+        # pipeline ignores them: with no topic matched ``in_scope`` is False, so
+        # no digest is built, no model object exists and the evidence table is
+        # never rendered. Those are the things worth asserting, and they are
+        # stricter than a fact count would be — an empty digest means nothing was
+        # even assembled to send.
+        check("K15 it is declined rather than answered",
+              oos is not None and not oos.in_scope and not oos.digest
+              and oos.result is None
+              and "This console does not hold that" in text
+              and "nothing was sent" in text,
+              f"in_scope={getattr(oos, 'in_scope', None)}, "
+              f"digest={len(getattr(oos, 'digest', '') or '')} char(s), "
+              f"result={getattr(oos, 'result', None)!r}")
+        check("K16 declining it cost nothing, and showed no evidence table",
+              seen["n"] == 0 and nugen_client.calls_made() == 0
+              and "Evidence retrieved" not in text,
+              f"{seen['n']} stub call(s), {nugen_client.calls_made()} real")
+
+        # ---- the old validation evidence is still reachable ---------------
+        check("K17 the engine's self-check survived the move into the expander",
+              "Operational Production Engine" in text
+              and "mass balance" in text.lower())
+
+        # ---- the closing comparison, and its caveat ----------------------
+        check("K18 the comparison with conventional processing renders",
+              "HydroSentry-AI vs conventional processing" in text
+              and "Conventional 2D modelling" in text)
+        check("K19 the comparison still admits ~2.3 h was not measured here",
+              "~2.3 h is a published benchmark for an equivalent HEC-RAS 2D "
+              "run, not something measured here" in text,
+              "the speed comparison's honesty caveat is missing")
+    finally:
+        nugen_client.complete = real_complete
+        _nugen_reset()
+
+
 def main() -> int:
-    for fn in (test_e, test_f, test_h, test_i, test_j):
+    for fn in (test_e, test_f, test_h, test_i, test_j, test_k):
         try:
             fn()
         except Exception as exc:                        # a raise is a failure

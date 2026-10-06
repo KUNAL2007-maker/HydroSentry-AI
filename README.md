@@ -376,7 +376,9 @@ solver, an MC-LSTM-PET drought forecaster and the Errorcastnet error model — w
 keeping the `BasinState` fields the dashboard reads. The Nugen language layer sits
 *outside* this seam by design: it reads the finished `BasinState` and directives and
 writes prose, so promoting a research model into Layer 1 changes what the briefings
-describe without changing the briefing layer at all.
+and the analyst describe without changing the language layer at all. The one thing it
+does hold onto is field *names* — the analyst's registry selects attributes off
+`BasinState` by name, so a field that is renamed has to be renamed there too.
 New live signals plug in the same way: extend `LiveObs` in [`live_data.py`](live_data.py)
 and map them in `forcing_from_live`. The design tokens (colours) live in the
 `C = {...}` dict and the `:root` CSS block so the look stays consistent as
