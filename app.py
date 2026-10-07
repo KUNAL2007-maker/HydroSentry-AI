@@ -2066,7 +2066,7 @@ def _render_ask(s, d):
          f"The {len(ans.facts)} fields this question selected, read by name off "
          f"the computed state"))
     m('<div class="hs-scroll"><table class="hs-table"><thead><tr>'
-      '<th>Field read</th><th>What it is</th><th>Value on this update</th>'
+      '<th>Field read</th><th>What it is</th><th>Reading on this update</th>'
       '</tr></thead><tbody>'
       + "".join(
           f'<tr><td><code>{_esc(f.field)}</code></td>'

@@ -15,3 +15,6 @@ venv/
 # OS / editor cruft
 .DS_Store
 Thumbs.db
+
+# Static snapshot produced by render_analyst_tab.py for visual review.
+analyst_tab_render.html
