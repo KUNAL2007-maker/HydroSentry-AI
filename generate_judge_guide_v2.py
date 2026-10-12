@@ -337,14 +337,14 @@ def build_guide_pdf(filename="HydroSentry-AI_Judge_and_NonTech_Guide.pdf"):
     gaps = [
         "<b>Gap #1: Weather apps give data, not decisions.</b> Seeing '80% chance of rain' does not tell a dam operator whether to lift radial gate #2 by 0.5 meters, nor does it tell a farmer if his seeds will drown.",
         "<b>Gap #2: Siloed departments.</b> The irrigation department manages dams, the agriculture office advises farmers, and civic police handle evacuations. They operate in separate silos. When a dam releases water at midnight, downstream rescue teams are caught completely unprepared.",
-        "<b>Gap #3: Too slow for flash extremes.</b> Legacy government flood simulation software takes 2 to 3 hours to compute a river wave—meaning the flood arrives before the computer finishes. Meanwhile, drought alerts only trigger after crops turn visibly brown, when root death is already irreversible."
+        "<b>Gap #3: Too slow for flash extremes.</b> A published benchmark for a single full 2D river-wave run on legacy government software is over two hours—meaning the flood can arrive before the computer finishes. Meanwhile, drought alerts only trigger after crops turn visibly brown, when root death is already irreversible."
     ]
     story.append(make_card(None, gaps, bg_color=BG_SLATE_50, border_color=BORDER_GREY, width=PRINTABLE_WIDTH))
     story.append(Spacer(1, 6))
 
     # Bottom Callout: Our Mission
     callout = [
-        "<b>OUR SOLUTION:</b> HydroSentry-AI acts as a <b>unified command console</b>. It monitors both extremes, computes water physics in <b>82.9 seconds (100x faster)</b>, and generates synchronized, clear action orders for all three frontline stakeholders simultaneously."
+        "<b>OUR SOLUTION:</b> HydroSentry-AI acts as a <b>unified command console</b>. It monitors both extremes, reaches an operator decision in <b>milliseconds on a single CPU core</b>, and generates synchronized, clear action orders for all three frontline stakeholders simultaneously. The hazard call itself is made by the <b>calculated flow</b> &mdash; a deterministic physics engine &mdash; never by a language model."
     ]
     story.append(make_card(None, callout, bg_color=BG_GREEN_50, border_color=BORDER_GREEN, width=PRINTABLE_WIDTH))
 
@@ -391,12 +391,12 @@ def build_guide_pdf(filename="HydroSentry-AI_Judge_and_NonTech_Guide.pdf"):
     s2_box = [
         Paragraph("<b>2. CALCULATE (The Brain)</b>", styles['CardTitle']),
         Spacer(1, 2),
-        Paragraph("Solves real water physics in <b>82.9 seconds</b> (100x speedup). Strictly enforces Conservation of Mass: it never hallucinates fake water.", styles['CardBody'])
+        Paragraph("Solves the water physics on one CPU core in <b>milliseconds</b>, timed on screen. Strictly enforces Conservation of Mass. <b>This step, and only this step, decides whether there is a hazard.</b>", styles['CardBody'])
     ]
     s3_box = [
         Paragraph("<b>3. ACT (The Voice)</b>", styles['CardTitle']),
         Spacer(1, 2),
-        Paragraph("Translates math into clear to-do lists: timed gate schedules for dam engineers, Marathi/Hindi SMS for farmers, and sector evacuation lists.", styles['CardBody'])
+        Paragraph("A fixed rule layer turns the computed state into to-do lists: timed gate schedules, Marathi/Hindi farmer SMS, and the order in which riverfront sectors must move.", styles['CardBody'])
     ]
     pipe_table = Table([[s1_box, s2_box, s3_box]], colWidths=[col3_w, col3_w, col3_w])
     pipe_table.setStyle(TableStyle([
@@ -497,10 +497,10 @@ def build_guide_pdf(filename="HydroSentry-AI_Judge_and_NonTech_Guide.pdf"):
          "<b>Why Judges Value This:</b> It eliminates city-wide panic! Instead of alarming 4 million citizens, only the specific 450 households in danger are evacuated.",
          BG_RED_50, BORDER_RED),
 
-        ("TAB 5 &mdash; SCIENCE & MODEL TRUST &nbsp;|&nbsp; For Academic Evaluators & Technical Jury",
-         "<b>What it shows:</b> Rigorous scientific validation proving the model can be trusted with human lives.<br/>"
-         "<b>Speed Validation:</b> Demonstrates that our physics surrogate runs <b>100x faster than traditional HEC-RAS hydraulic models</b> (82.9 seconds vs 2.3 hours).<br/>"
-         "<b>The 'Honesty Test':</b> Proves that unlike standard black-box AI models that hallucinate +25% fake water during heatwaves, HydroSentry-AI achieves strictly 0% water hallucination.",
+        ("TAB 5 &mdash; AI ANALYST &nbsp;|&nbsp; For Academic Evaluators &amp; Technical Jury",
+         "<b>What it shows:</b> Ask the console a question in plain English; it answers from the state this page just computed.<br/>"
+         "<b>How to read it:</b> The answer comes first, then <b>Evidence retrieved</b> &mdash; the named fields the question pulled off the computed state &mdash; then the <b>AI harness</b>, showing what each stage did and whether the model's wording was allowed to stand. Every figure in the reply is checked back against those fields; a reply quoting anything else is withheld, and the computed answer stands either way.<br/>"
+         "<b>Underneath:</b> An <b>Engine validation</b> expander holds the engine's live self-check &mdash; mass balance, determinism, runtime spread, rule audit and rainfall sensitivity &mdash; and a short <b>HydroSentry-AI vs conventional processing</b> comparison closes the tab.",
          BG_SLATE_50, BORDER_GREY),
     ]
 
@@ -524,13 +524,13 @@ def build_guide_pdf(filename="HydroSentry-AI_Judge_and_NonTech_Guide.pdf"):
     story.append(Spacer(1, 2))
 
     diffs = [
-        ("1. Zero 'Hallucination' by Design (Physics-Guided AI)",
-         "Most artificial intelligence models (such as ChatGPT or standard deep neural networks) are 'black boxes'—they identify statistical patterns without understanding physical laws. During extreme 42°C summer heatwaves, black-box AI often invents <b>20% to 25% fake water</b> out of thin air because it confuses temperature spikes with humidity patterns!<br/>"
-         "<b>Our Innovation:</b> HydroSentry-AI hard-wires <b>Conservation of Mass</b> directly into its equations: <i>(Water In) - (Water Out) = Change in Storage</i>. It is mathematically impossible for our system to hallucinate fake water."),
+        ("1. The Calculated Flow Makes the Call &mdash; the AI Never Does",
+         "Most AI models (such as ChatGPT or standard deep neural networks) are 'black boxes'—they identify statistical patterns without understanding physical laws. Asked about water during a 42°C heatwave, a black-box model will answer fluently and sometimes invent water that was never there. A wrong number in a flood warning is the worst output this kind of project can produce.<br/>"
+         "<b>So we drew the line in the code, not in the pitch.</b> HydroSentry-AI hard-wires <b>Conservation of Mass</b> into its equations: <i>(Water In) - (Water Out) = Change in Storage</i>. Whether there is a hazard, how high, how soon and who is exposed is computed by that deterministic physics engine and nothing else. <b>The AI is confined to three jobs, each of which only chooses among options the engine already computed:</b> (1) <b>alerts</b> phrased from 14 deterministic pattern detectors over the computed series, (2) <b>mitigation measures</b> selected from a fixed 36-measure catalogue—it cannot invent a measure, because a measure outside the table is not on the menu, and (3) <b>safe-place guidance</b>. Every detector states what the data already shows in the past or present tense; none of them says <i>will</i>, <i>expected</i> or <i>likely</i>. The console renders identically with the AI switched off."),
 
-        ("2. 100× Faster Than Traditional Hydraulic Simulators",
-         "For three decades, government agencies have relied on heavy software like HEC-RAS to simulate flood waves. However, HEC-RAS requires <b>2 hours and 20 minutes</b> to calculate a single river surge. In a flash flood where rain hits Pune in 90 minutes, traditional tools finish long after homes are submerged.<br/>"
-         "<b>Our Innovation:</b> Our neural-physical surrogate solves the exact hydrodynamic equations in just <b>82.9 seconds</b>, giving rescue teams an actionable 45-to-90 minute window to safely move families to high ground."),
+        ("2. The Decision Arrives in Milliseconds, Not Hours",
+         "For three decades, government agencies have relied on heavy 2D software like HEC-RAS to simulate flood waves. A published benchmark for a single HEC-RAS 2D river-surge run is roughly <b>2 hours 20 minutes</b>. In a flash flood where rain reaches Pune in 90 minutes, that finishes long after homes are submerged.<br/>"
+         "<b>Our Innovation:</b> HydroSentry-AI does not try to be a faster 2D model. It answers the three questions a control room actually has—<i>how high, how soon, who is exposed</i>—with a closed-form physics chain that finishes in <b>milliseconds on a single CPU core</b>, timed live on screen with <i>perf_counter()</i> on every update. <b>Be precise if a judge presses you:</b> the ~2.3 h figure is a published benchmark, not something we measured, and the two approaches solve different-sized problems. The honest claim is not that we are a faster 2D model—it is that <b>the decision a control room needs does not require one.</b>"),
 
         ("3. Runs 100% Offline in an Emergency Bunker",
          "During severe flood emergencies, municipal power grids fail, cell towers submerge, and internet fiber lines snap. Cloud-hosted AI models (OpenAI, AWS, Google Cloud) become entirely useless without high-speed internet.<br/>"
@@ -557,22 +557,28 @@ def build_guide_pdf(filename="HydroSentry-AI_Judge_and_NonTech_Guide.pdf"):
             Paragraph("<b>HydroSentry-AI<br/>(Our Solution)</b>", styles['TableHead']),
         ],
         [
-            Paragraph("<b>Simulation Speed</b>", styles['TableCellBold']),
-            Paragraph("2.3 Hours (Too slow for flash floods)", styles['TableCell']),
-            Paragraph("Fast (10 - 30 seconds)", styles['TableCell']),
-            Paragraph("<b>82.9 Seconds (100x speedup)</b>", styles['TableCellBold']),
+            Paragraph("<b>Time to a Decision</b>", styles['TableCellBold']),
+            Paragraph("~2.3 Hours (published benchmark; a full 2D surface)", styles['TableCell']),
+            Paragraph("Seconds, but not reproducible", styles['TableCell']),
+            Paragraph("<b>Milliseconds &mdash; measured live on screen</b>", styles['TableCellBold']),
         ],
         [
             Paragraph("<b>Physical Trust</b>", styles['TableCellBold']),
             Paragraph("High (Strict physics)", styles['TableCell']),
-            Paragraph("Poor (+25% water hallucination)", styles['TableCell']),
-            Paragraph("<b>100% Mass Conserved (Zero drift)</b>", styles['TableCellBold']),
+            Paragraph("Poor (no mass constraint)", styles['TableCell']),
+            Paragraph("<b>Mass conserved to machine precision</b>", styles['TableCellBold']),
+        ],
+        [
+            Paragraph("<b>Re-running It</b>", styles['TableCellBold']),
+            Paragraph("Re-meshing and re-calibration between runs", styles['TableCell']),
+            Paragraph("Varies run to run", styles['TableCell']),
+            Paragraph("<b>Byte-identical, proved on screen</b>", styles['TableCellBold']),
         ],
         [
             Paragraph("<b>Drought Foresight</b>", styles['TableCellBold']),
             Paragraph("None (Only models flood flow)", styles['TableCell']),
             Paragraph("Reactive (Waits for brown leaves)", styles['TableCell']),
-            Paragraph("<b>10 Days Early (NASA soil data)</b>", styles['TableCellBold']),
+            Paragraph("<b>Days-to-wilting countdown over a 14-day horizon</b>", styles['TableCellBold']),
         ],
         [
             Paragraph("<b>Hardware & Network</b>", styles['TableCellBold']),
@@ -581,10 +587,10 @@ def build_guide_pdf(filename="HydroSentry-AI_Judge_and_NonTech_Guide.pdf"):
             Paragraph("<b>Standard Laptop, 100% Offline</b>", styles['TableCellBold']),
         ],
         [
-            Paragraph("<b>Action Output</b>", styles['TableCellBold']),
-            Paragraph("Raw hydrographs for engineers", styles['TableCell']),
-            Paragraph("Generic unstructured text", styles['TableCell']),
-            Paragraph("<b>Marathi/Hindi SMS + Gate Orders</b>", styles['TableCellBold']),
+            Paragraph("<b>Who States the Hazard</b>", styles['TableCellBold']),
+            Paragraph("A hydrologist, after interpreting depth grids", styles['TableCell']),
+            Paragraph("The model itself &mdash; unverifiably", styles['TableCell']),
+            Paragraph("<b>The physics engine. The AI only advises on response.</b>", styles['TableCellBold']),
         ],
     ]
     
@@ -601,6 +607,11 @@ def build_guide_pdf(filename="HydroSentry-AI_Judge_and_NonTech_Guide.pdf"):
         ('RIGHTPADDING', (0, 0), (-1, -1), 5),
     ]))
     story.append(comp_table)
+    story.append(Spacer(1, 3))
+    honesty_note = [
+        "<b>READ THE FIRST ROW CAREFULLY</b> &mdash; it is the only one that is not like for like, and the console says so on screen too. Our figure is the engine's own <i>perf_counter()</i> reading for the update on display; <b>~2.3 h is a published HEC-RAS 2D benchmark, not something measured in this project.</b> A 2D solver produces a full inundation surface we do not attempt. If a judge challenges the comparison, concede the point and make the real one: the decision a control room needs does not require a 2D surface."
+    ]
+    story.append(make_card(None, honesty_note, bg_color=BG_AMBER_50, border_color=BORDER_AMBER, width=PRINTABLE_WIDTH, pad_v=3.5, pad_h=7))
 
     story.append(PageBreak())
 
@@ -619,7 +630,7 @@ def build_guide_pdf(filename="HydroSentry-AI_Judge_and_NonTech_Guide.pdf"):
     p2 = [
         "<b>2. Preventing 'Midnight Dam Dumps' in Pune City</b>",
         "During the devastating Pune floods of 2019 and 2024, residents along Sinhagad Road woke up to water flooding their homes because Khadakwasla Dam opened radial gates at midnight.<br/>"
-        "By employing <b>FIRO (Forecast-Informed Reservoir Operations)</b>, our system predicts inflow surges 6 hours in advance and safely pre-releases smaller volumes during daytime. This maintains river stage safely below levee crests."
+        "By employing <b>FIRO (Forecast-Informed Reservoir Operations)</b>, our physics engine computes the inflow surge six hours ahead and schedules a safe, smaller daytime pre-release. This maintains river stage safely below levee crests."
     ]
     p3 = [
         "<b>3. Hyper-Local Evacuation: Halting City-Wide Panic</b>",

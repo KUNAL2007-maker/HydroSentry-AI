@@ -136,15 +136,16 @@ Five tabs, each written for a non-technical reader first:
 | **Farmer advisory** | Farmers | Flash-drought warning, evaporative-stress gauge, root-zone moisture trend, the Marathi/English SMS |
 | **Reservoir operations** | Dam operators | FIRO pre-release directive, storage gauge, inflow forecast, live gate schedule |
 | **Disaster response** | Civic teams | Geofenced evacuation directive, affected-zone table, map placeholder |
-| **AI analyst** | Judges / reviewers | A question box answered from the state the page just computed, the fields it read, the harness that checked the answer, the briefing layer's spend — and the engine's validation evidence one expander down |
+| **AI analyst** | Judges / reviewers | A question box answered from the state the page just computed, the fields it read by name, and what each stage of the answer did — with the engine's validation evidence one expander down |
 
 ---
 
-## Architecture — two clearly separated layers
+## Architecture — the engine, and everything that is not the engine
 
 HydroSentry-AI is deliberately split in two, and the console never mixes them.
+One half computes; the other half does not, and is not permitted to.
 
-### Layer 1 — Operational Production Engine (what actually runs)
+### Operational Production Engine — what actually runs
 
 Deterministic physics and statistics in [`hydro_engine.py`](hydro_engine.py), solved
 on the CPU with no model weights, no GPU and no network call:
@@ -170,23 +171,24 @@ Live observations (Open-Meteo) → Forcing → Gamma UH convolution
   → FAO-56 ESR / ESP → BasinState → Rule-based directives → Dashboard
 ```
 
-### Layer 2 — Research & Neural Surrogates (does not produce a number)
+### Research & Neural Surrogates — not in the live path
 
-Layer 2 has two tracks, and neither one computes a value the console displays.
+Nothing in this half computes a value the console displays.
 
-The **research track** targets what the closed-form engine deliberately does not
-attempt — full 2D inundation mapping and learned error correction: a **PINN**
-flood-map surrogate, an **MC-LSTM-PET** drought forecaster and **Errorcastnet**
-bias correction. None of it executes to render the console.
+It targets what the closed-form engine deliberately does not attempt — full 2D
+inundation mapping and learned error correction: a **PINN** flood-map surrogate,
+an **MC-LSTM-PET** drought forecaster and **Errorcastnet** bias correction. None
+of it executes to render the console.
 
-The **language track** is the **Nugen** layer, and it does run — on every update, in
-the product. It writes the per-role briefings and it answers an operator's questions,
-and in neither job does it produce a number. It is described in full below.
-
-The headline **~82.9 s** figure belongs to the research track: it is the PINN
-surrogate's benchmark for producing a 2D depth map, against **~2.3 h** for an
-equivalent HEC-RAS 2D run (~100× faster). **It is a research benchmark, not the
-runtime of the operational engine.**
+The headline **~82.9 s** figure belongs here, and it is the one number in this
+README that was not produced by this project. It is the PINN surrogate's
+published benchmark for producing a 2D depth map, against **~2.3 h** for an
+equivalent HEC-RAS 2D run. **It is a benchmark quoted from the literature, not
+the runtime of the operational engine, and not something measured here.** The
+engine's own runtime is the millisecond figure above, measured per update. The
+two solve different-sized problems; see
+**[How it compares](#how-it-compares-to-conventional-processing)** for what can
+honestly be claimed from the pair.
 
 ```
 Historical / synthetic events → PINN 2D Saint-Venant surrogate → ~82.9 s depth map
@@ -194,82 +196,119 @@ Historical / synthetic events → PINN 2D Saint-Venant surrogate → ~82.9 s dep
   → Validation vs HEC-RAS 2D & gauges → Research notebooks
 ```
 
-Research-track components are staged behind the same `simulate()` seam, so each can
-be promoted into Layer 1 once it is validated against gauge records.
+These components are staged behind the same `simulate()` seam, so each can be
+promoted into the production engine once it is validated against gauge records.
 
-### The Nugen language layer
+### What the AI does, and what it is not allowed to do
 
-A directive is written once but read by three different people. The duty engineer
-wants gate settings, the farmer wants to know whether to irrigate, and the disaster
-officer wants to know who to move and when. Every role tab therefore carries a
-**Nugen briefing** ([`nugen_client.py`](nugen_client.py)) beneath its directive card:
-the same decision the rule engine already made, re-worded for the reader that tab is
-for. The same layer also answers questions on the AI analyst tab — still only from
-numbers the engine computed, and still never computing one. See
-**[Asking the console a question](#asking-the-console-a-question)**.
+A language model is a good writer and a bad hydrologist, so it is given the
+writing and kept away from the hydrology. In this project that boundary is not a
+convention anyone has to remember — it is where the code is cut.
 
-The boundary is the whole design. The layer is handed the numbers Layer 1 computed
-and instructed to use nothing else; every figure it prints is checked back against
-the computed state and anything unsupported is flagged on the card itself. It cannot
-reach the physics engine, the directive cards remain the authoritative wording, and
-**the console renders identically with the layer switched off** — a language model is
-a good writer and a bad hydrologist, so it is given the writing and kept away from the
-hydrology.
+**The engine states the hazard.** Whether there is a flood, how high, how soon,
+who is exposed, whether the soil has reached the climatological dry tail: every
+one of those is a number `simulate()` computed and a threshold
+`make_directives()` applied. The severity badges, the directive cards, the
+time-to-impact and the gate schedule are produced with no model involved, and
+the console renders every one of them with the assistance layer switched off.
 
-**Two models, read from the account's own catalogue.** The endpoint addresses a base
-model by its *exact* Hugging Face id; a vendor-style alias (`qwen-v2p5-0p5b-instruct`)
-is answered with a 404, which is how this layer broke once. The documented default is
-therefore `Qwen/Qwen2.5-0.5B-Instruct`, and `resolve_models()` reads
-`GET /api/v3/models/base?inference_ready=true&type=text-generation` once per process
-and picks from what this account can actually call: the **smallest** instruct model for
-the role briefings, which are a paraphrase, and the **largest** one under a 34B ceiling
-for the analyst, which has to understand a question rather than re-word a sentence.
-Both fall back to the default, so an unreachable or empty catalogue costs nothing but
-the larger model. That listing is not an inference request and is not charged against
-the call budget, and a 404 naming the model buys one catalogue re-read and one retry —
-no more, so a genuinely missing model cannot turn every request into two.
+**The AI is confined to three jobs**, and each draws on a candidate set the
+engine computed first — the `RESPONSE SUPPORT` block at the end of
+[`hydro_engine.py`](hydro_engine.py):
 
-```bash
-export NUGEN_API_KEY="your-key"     # or .streamlit/secrets.toml (gitignored)
-```
-
-On Render, set `NUGEN_API_KEY` under **Environment → Environment Variables** — not in
-`render.yaml`, which is public. The key is never committed.
-
-**Quota discipline is built in**, because a layer that fetches as the basin changes
-has to be cheap by construction rather than by good intentions:
-
-| Device | Effect |
+| Job | The deterministic set behind it |
 | --- | --- |
-| Digest-keyed cache | One distinct situation costs at most one call per role, however many times the page re-renders |
-| No wall clock in the digest, every reading rounded | Ordinary feed jitter (31.4 → 31.5 mm/hr) is not mistaken for news and re-billed |
-| `AUTO_CALL_BUDGET` (18) below `CALL_BUDGET` (60) | Automatic briefings cannot consume the session; the headroom is what a deliberate briefing and the interactive analyst answer out of |
-| Demo mode never auto-fires | 33 scripted ticks at a 2 s refresh would drain a budget in under a minute and say nothing new |
-| Background thread, never inline | A 30 s read timeout cannot freeze the console on the updates that matter |
-| 500-token hard cap — 150 per role briefing, 300 per analyst answer | Bounded cost per call |
+| **Alerts from data patterns** | `detect_patterns(state)` — 14 detectors over the computed series: inflow-curve shape, storage accumulating against release, pre-release opening buffer, downstream flow against the safe-channel and levee limits, the levee threshold crossed, the soil-moisture trajectory, actual water use against atmospheric demand, the evaporative-stress percentile tail, both hazards elevated at once, and rain falling without recharge |
+| **Mitigation suggestions** | `mitigations(state, role)` — rule-based selection from a 36-measure catalogue across the farmer, dam, disaster and public desks |
+| **Safe-place guidance** | `safe_guidance(state, place)` — the order in which zones must move, and the criteria a destination has to meet |
 
-The **AI analyst** tab is the layer's audit surface: the exact prompt sent for every
-role, the exact prompt sent for a question, the calls actually spent against the
-allowance, and the figure check. `verify_app.py` test I asserts this policy against a
-stubbed transport — no key means no call, the demo never fetches, and three live
-renders of an unchanged basin spend three calls, not nine.
+Two properties are what make that hold rather than merely intend to hold.
+
+A pattern's `detail` string is a statement in the past or present tense about
+data that already exists. No detector says *will*, *expected* or *likely*, and
+where one reads a forward-looking array — the stored inflow curve covers the next
+six hours — the sentence is phrased as a property of the curve rather than as a
+prediction about the river: *"the computed inflow curve rises 180 m³/s across its
+first 3 hours"*, not *"the river will rise"*. A pattern is evidence; a forecast is
+a claim, and the claim is the engine's to make.
+
+And every pattern threshold reuses the engine's own published constants, so a
+pattern cannot disagree with the severity badge beside it. The levee-crossing
+detector grades itself on the same 0.1 m and 0.35 m overtopping cuts that
+`simulate()` uses for its household count, which is why that severity and that
+household figure can never contradict each other on screen.
+
+Mitigation is the same guarantee in table form. `MITIGATIONS` is a catalogue, not
+a generator: every measure carries a `horizon`, the reading that put it on screen,
+and the guidance family it is drawn from, and the model's job is to select among
+what applies and phrase it. **It cannot add a measure, because a measure that is
+not in the table is not in the candidate set the console renders.** Each measure's
+trigger is a predicate over one engine field, so an operator can always be told
+which reading put it there.
+
+On those citations, since this is easy to overclaim: an `authority` field names
+the issuing body and the subject — "NDMA guidelines on flood management", "ICAR
+drought contingency planning", "CWC reservoir operation practice" — and not a
+clause number, because a clause reference this project has not verified would be
+worse than none. Several entries read "general practice", which is exactly what
+they are: standard control-room or field practice for which no single guideline
+is cited here. None of it is an external certification of this software.
+
+#### Where to go — an order of movement, not a destination
+
+This is the one place where the honest answer is smaller than the impressive
+one, so it is worth stating plainly why the smaller answer is the one shipped.
+
+An audit established that the console holds no shelter register and no terrain
+model. The only candidate places in its data are the three zones a basin is being
+evacuated *from*. They carry elevation *labels* ("538 m") that are the demo
+basin's figures reused verbatim for every region and never parsed as numbers
+anywhere in the app. The highest of the three is still a zone the app's own
+time-to-impact banding paints critical once the levee goes, because it carries a
+finite arrival delay — it is not a refuge. And `shelter_phrase` is a sentence
+template over a region name, which in live mode asserts a designated district
+facility this software has never checked. Naming a place would therefore mean
+inventing one.
+
+What *can* be computed honestly is the order in which zones have to move. Each
+zone's time to impact is the basin's own `time_to_overtop_min` plus the delay the
+zone list carries for it — the same arithmetic the disaster tab's zone table
+already does, so the two cannot disagree. So the console computes that order,
+states the `DESTINATION_CRITERIA` a destination has to satisfy — uphill and away
+from the river rather than merely further along the bank; a building the district
+plan already designates rather than one chosen on the day; reachable without
+crossing water already moving; able to take livestock and vehicles as well as
+people — and then hands off: *confirm the specific site against your district
+disaster-management plan; this console holds the basin's hydrology, not its
+shelter register.* Every one of those criteria is checkable by a person standing
+in the place, which is the point of writing criteria instead of coordinates. A
+named site appears only in the scripted demo, where the geography is part of the
+script.
+
+> **Deployment note — for whoever deploys this, not for anyone using it.** The
+> assistance layer reads its credential from a `NUGEN_API_KEY` environment
+> variable or a gitignored `.streamlit/secrets.toml`; on Render it goes under
+> **Environment → Environment Variables** and not into `render.yaml`, which is
+> public. It is never committed. Nothing in the console asks an operator to
+> configure anything, and the console renders identically with the layer
+> unconfigured — the computed answer is the answer either way.
 
 ### Asking the console a question
 
-The analyst is that same layer doing a second job, and it is the one job where a
-language model could do real damage. Asked *"how long until the levee goes under?"*
+The analyst is the same assistance layer doing one more job, and it is the job where
+a language model could do real damage. Asked *"how long until the levee goes under?"*
 with the whole console in its context, a model answers fluently and sometimes wrongly,
 and a wrong number in a flood warning is the worst output this project can produce. So
-the model is never the thing that reads the data. The question box on tab 5 runs six
-stages, and the tab prints what each one did with your question as an **AI harness**
-table:
+the model is never the thing that reads the data. The question box on the analyst tab
+runs six stages, and the tab prints what each one did with your question as an **AI
+harness** table:
 
 | Stage | What it does |
 | --- | --- |
 | **Scope** | The question is matched against the topics this console actually holds. No match means no model call: the honest answer is *"this console does not hold that"*, which costs nothing and cannot be wrong |
 | **Retrieve** | The matched topics select state fields **by name** — ordinary attribute lookup, exact by construction. The fields read are shown to the operator in an evidence table |
 | **Ground** | A rule-built answer is composed from those fields **before any model runs**. This is the answer of record |
-| **Generate** | Nugen is handed the question and those fields, and nothing else |
+| **Generate** | The model is handed the question and those fields, and nothing else |
 | **Verify** | Every figure in the reply is checked back against the retrieved facts |
 | **Fall back** | A failed, degenerate or unverified reply is discarded and the computed answer stands |
 
@@ -298,8 +337,9 @@ and the labelled reference constants.
 ### How it compares to conventional processing
 
 The tab closes with a five-row comparison against conventional 2D modelling — time to
-a decision, what it runs on, re-running it, what comes out, and the language layer. It
-is deliberately not a tab of its own: a comparison is a closing remark, not a finding.
+a decision, what it runs on, re-running it, what comes out, and what the AI
+contributes. It is deliberately not a tab of its own: a comparison is a closing
+remark, not a finding.
 
 Only the first row needs care, and the table says so on screen. The left-hand figure is
 this engine's own `perf_counter()` reading for the update on display; **~2.3 h is a
@@ -314,7 +354,8 @@ not require one.
 
 ## What the engine actually computes
 
-`hydro_engine.py` exposes three pure functions of `(scenario, tick)`:
+`hydro_engine.py` exposes three pure functions of `(scenario, tick)` — these are the
+whole operational path:
 
 - **`simulate(scenario, tick) -> BasinState`**
   - *Flood / reservoir:* rainfall pulse → runoff → gamma unit hydrograph inflow →
@@ -330,6 +371,20 @@ not require one.
   and reservoir-level columns are integrated with the *same* mass balance, so the
   action, release and level always agree.
 
+A fourth group of pure functions sits at the end of the file under `RESPONSE
+SUPPORT`. They are the candidate sets the assistance layer draws on, and they are
+strictly additive: `simulate()` and `make_directives()` never call into them and
+their return values are untouched, so the frozen demo snapshot cannot move.
+
+- **`detect_patterns(state) -> list[Pattern]`** — what the computed series already
+  shows, most severe first, each entry carrying the arithmetic and the state
+  fields behind it.
+- **`mitigations(state, role, limit) -> list[Mitigation]`** — the measures from the
+  catalogue whose trigger holds for this state, most urgent horizon first.
+- **`evacuation_order(state, place)` / `safe_guidance(state, place)`** — the order
+  zones must move in, with the criteria a destination has to meet and the handoff
+  to the authority that holds the shelter register.
+
 Because everything is a pure function of `(scenario, tick)`, the UI can render any
 moment, step forward, or replay — and real models can later replace `simulate()`
 without touching the dashboard.
@@ -343,10 +398,10 @@ PCCOE HYDRO/
 ├── app.py                 # the dashboard (Streamlit, organised by tab)
 ├── hydro_engine.py        # the physics + statistics engine (demo + live)
 ├── live_data.py           # real-time basin fetch (Open-Meteo, pluggable)
-├── nugen_client.py        # Nugen layer: role briefings + grounded analyst (needs a key)
+├── nugen_client.py        # the assistance layer: mitigation wording + grounded analyst
 ├── verify_demo_golden.py  # regression guard: demo output must stay byte-identical
 ├── verify_fixes.py        # acceptance checks: clock, directives, zones, timing
-├── verify_app.py          # Streamlit AppTest checks (modes, failure path, briefing layer)
+├── verify_app.py          # Streamlit AppTest checks (modes, failure path, assistance layer)
 ├── requirements.txt       # streamlit + plotly + numpy + requests
 ├── render.yaml            # Render Blueprint (one-click cloud deploy)
 ├── README.md              # this file
@@ -373,11 +428,11 @@ python verify_app.py
 `Forcing` built from live observations (`forcing_from_live`), so real data already
 flows through it today. Swap its internals for the production models — a PINN flood
 solver, an MC-LSTM-PET drought forecaster and the Errorcastnet error model — while
-keeping the `BasinState` fields the dashboard reads. The Nugen language layer sits
-*outside* this seam by design: it reads the finished `BasinState` and directives and
-writes prose, so promoting a research model into Layer 1 changes what the briefings
-and the analyst describe without changing the language layer at all. The one thing it
-does hold onto is field *names* — the analyst's registry selects attributes off
+keeping the `BasinState` fields the dashboard reads. The assistance layer sits
+*outside* this seam by design: it reads the finished `BasinState`, the directives and
+the computed candidate sets, and writes prose, so promoting a research model into the
+production engine changes what it describes without changing the layer at all. The one
+thing it does hold onto is field *names* — the analyst's registry selects attributes off
 `BasinState` by name, so a field that is renamed has to be renamed there too.
 New live signals plug in the same way: extend `LiveObs` in [`live_data.py`](live_data.py)
 and map them in `forcing_from_live`. The design tokens (colours) live in the

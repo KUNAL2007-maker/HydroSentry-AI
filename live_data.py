@@ -177,6 +177,18 @@ class LiveObs:
     sm_days: np.ndarray = field(default_factory=lambda: np.array([]))
     sm_series: np.ndarray = field(default_factory=lambda: np.array([]))
 
+    # --- real terrain -----------------------------------------------------
+    # The ONLY genuine elevation anywhere in this app: the DEM height of the
+    # grid cell Open-Meteo answered for, returned as a top-level ``elevation``
+    # in the SAME forecast response we already fetch — no extra request, no
+    # extra quota. It must never be confused with the ``elev`` strings on
+    # ``hydro_engine.Place.sectors`` ("538 m", "540 m", "544 m"): those are
+    # Pune's scripted demo *labels*, reused verbatim for every region and never
+    # parsed as numbers, so in live mode they say nothing about the basin on
+    # screen. ``None`` means "not known" — see ``_elevation_m``; the field is
+    # last in the dataclass so adding it cannot shift any positional argument.
+    elevation_m: float | None = None
+
 
 # ============================================================================
 # Provider interface + implementations
@@ -265,6 +277,10 @@ class OpenMeteoProvider(DataProvider):
         o.temp_now = _f(cur.get("temperature_2m"))
         o.precip_now = _f(cur.get("precipitation"), 0.0)
         o.humidity = _f(cur.get("relative_humidity_2m"))
+
+        # the basin's real height above sea level — free, top-level in this very
+        # response, and the app's only non-scripted elevation (see LiveObs)
+        o.elevation_m = _elevation_m(j)
 
         # locate "now" within the hourly arrays
         now = _to_dt(cur["time"]) if cur.get("time") else datetime.now()
@@ -524,3 +540,30 @@ def _today_index(daily: dict, now: datetime) -> int:
         if str(d).startswith(today):
             return i
     return 0
+
+
+# Plausible range for a DEM cell on land, in metres. The lowest inhabited land
+# on Earth (the Dead Sea shore, about -430 m) and the highest terrain (about
+# 8 850 m) both sit comfortably inside it, so a value outside these bounds is a
+# provider glitch or a changed schema — not a basin.
+ELEV_MIN_M = -500.0
+ELEV_MAX_M = 9000.0
+
+
+def _elevation_m(j: dict) -> float | None:
+    """Open-Meteo's top-level ``elevation`` (metres above sea level), or None.
+
+    This is the one real elevation the app has (see ``LiveObs.elevation_m``),
+    so it is worth stating plainly what we refuse to pass on. A missing or
+    ``null`` field, a non-numeric one, a NaN, or a number outside
+    ``ELEV_MIN_M … ELEV_MAX_M`` all yield ``None``.
+
+    ``None`` means **not known**, and nothing substitutes for it. Inventing a
+    fallback here is exactly the failure this field exists to end: the UI is
+    then free to say nothing rather than quote Pune's height over another
+    basin, which is what the hard-coded sector labels silently do.
+    """
+    v = _f(j.get("elevation") if isinstance(j, dict) else None)
+    if not math.isfinite(v) or not (ELEV_MIN_M <= v <= ELEV_MAX_M):
+        return None
+    return v

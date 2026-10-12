@@ -98,12 +98,12 @@ BENCHMARK_COMPUTE_S = 82.9
 # Flood / reservoir
 BASEFLOW = 190.0               # m³/s baseline inflow
 UH_K, UH_THETA = 3.2, 2.05     # gamma unit-hydrograph shape/scale -> peak ~4.5 h
-RES_CAP_AFT = 150_000.0        # reservoir capacity (acre-feet)
+RES_CAP_AFT = 150_000.0        # reservoir capacity (acre-ft)
 RES_START_FRAC = 0.78          # storage at scenario start
 BASE_RELEASE = 120.0           # m³/s normal downstream release
 SAFE_CHANNEL = 600.0           # m³/s safe downstream channel capacity
 LEVEE_Q = 700.0                # m³/s at which the levee begins to overtop
-MS_TO_AFT_PER_H = 3600.0 / 1233.48   # m³/s -> acre-feet per hour  (~2.918)
+MS_TO_AFT_PER_H = 3600.0 / 1233.48   # m³/s -> acre-ft per hour  (~2.918)
 LEVEL_MIN, LEVEL_MAX = 55.0, 63.5    # reservoir level (m) at empty/full
 
 # Drought / soil
@@ -358,8 +358,14 @@ class Place:
     agri_belt: str       # farmland label, e.g. "Nashik agricultural belt"
     reservoir: str       # reservoir/dam label, e.g. "Nashik reservoir"
     dam_name: str        # feed dam label (no "Reservoir" suffix), e.g. "Khadakwasla"
-    sectors_text: str    # riverside zones as prose, e.g. "Sectors 4 and 5"
-    sectors_amp: str     # riverside zones (HTML '&amp;' variant) for meta/feed
+    # The zone designator, bare: it names the zones and nothing else. No leading
+    # article, and no "low-lying" qualifier, because the sentence around it
+    # supplies that itself ("Evacuate low-lying {sectors_text} now"). Both
+    # sources below must keep to that form — when one of them folded the
+    # qualifier into the label, live mode read "Evacuate low-lying the low-lying
+    # Nashik riverside zones", which is the fault this comment exists to prevent.
+    sectors_text: str    # e.g. "Sectors 4 and 5" / "Nashik riverside zones"
+    sectors_amp: str     # the same label with HTML '&amp;', for meta/feed
     road_action: str     # full action sentence: closing the riverside road
 
     # Evacuation geography. ``sectors`` drives the Disaster-response tab's zone
@@ -377,8 +383,14 @@ class Place:
          "elev": "544 m", "share": 0.0, "delay": 90, "dlat": -0.070, "dlon": 0.010,
          "households": 300},
     ])
-    # where residents are moved to, as a sentence fragment ("Move residents to …")
-    shelter_phrase: str = "designated district emergency high ground"
+    # where residents are moved to, as a sentence fragment ("Move residents to …").
+    # Unlike sectors_text this one carries its own article, because both real
+    # sources do ("the high-ground shelters on Route H2" / "the {short} district
+    # …") and the consumer prepends nothing. This default is a fallback only —
+    # DEMO_PLACE and place_from_region both set it — but it has to obey the same
+    # rule, or a directly constructed Place would read "Move residents to
+    # designated district emergency high ground."
+    shelter_phrase: str = "the designated district emergency high ground"
     # compact label for the "Shelters ready" readout context
     shelter_short: str = "District designated high ground"
     # how the at-risk area is described; basins without a surveyed levee datum
@@ -433,8 +445,12 @@ def place_from_region(region_name: str) -> Place:
         agri_belt=f"{short} agricultural belt",
         reservoir=f"{short} reservoir",
         dam_name=short,
-        sectors_text=f"the low-lying {short} riverside zones",
-        sectors_amp=f"the low-lying {short} riverside zones",
+        # Bare zone designator, as the Place field comment requires: the
+        # "low-lying" qualifier and any article belong to the sentence that uses
+        # the label, not to the label itself. There is no '&' to escape here, so
+        # the two variants are identical.
+        sectors_text=f"{short} riverside zones",
+        sectors_amp=f"{short} riverside zones",
         road_action="Close low-lying riverside access roads to incoming traffic.",
         # Place() supplies the generic Zone A/B/C geography via its field default
         shelter_phrase=f"the {short} district designated emergency high ground",
@@ -944,3 +960,718 @@ def make_directives(s: BasinState, place: "Place | None" = None,
                      "<b>Basin normal:</b> no directives active. Continuing routine monitoring."))
 
     return {"farmer": farmer, "dam": dam, "disaster": disaster, "sms": sms, "feed": feed}
+
+
+# ============================================================================
+# RESPONSE SUPPORT — the deterministic backing for the AI assistance layer
+# ============================================================================
+# Three things the AI is allowed to help with, and the computed candidate set
+# behind each one. The division is the whole point: the engine decides WHETHER
+# (above, in simulate and make_directives) and this block decides WHAT CAN BE
+# DONE ABOUT IT. The language layer may phrase and prioritise what it finds
+# here; it may not add a measure, name a place, or state a hazard.
+#
+# Everything below is additive. simulate() and make_directives() do not call
+# into it and their return values are untouched, so the frozen demo snapshot
+# cannot move.
+# ============================================================================
+
+_SEV_RANK = {"critical": 0, "warning": 1, "watch": 2, "safe": 3}
+
+
+def _tier(value: float, watch: float, warning: float, critical: float) -> str:
+    """Severity from ascending cuts. Negate the inputs for a descending scale."""
+    if value >= critical:
+        return "critical"
+    if value >= warning:
+        return "warning"
+    if value >= watch:
+        return "watch"
+    return "safe"
+
+
+def _plural(n: float, one: str, many: str) -> str:
+    return one if abs(n - 1) < 1e-9 else many
+
+
+# ---------------------------------------------------------------------------
+# 1. PATTERNS — what the computed series already shows
+#
+# Every detail string is a statement in the past or present tense about data
+# that exists now. None says "will", "expected", "likely" or names a future
+# event, because a pattern is evidence and a forecast is a claim. Where a
+# detector reads a forward-looking array (fc_inflow holds the next six hours),
+# the sentence is phrased as a property of the stored curve rather than as a
+# prediction about the river.
+#
+# Thresholds reuse the engine's own published constants wherever one exists, so
+# a pattern can never disagree with the severity badge beside it.
+# ---------------------------------------------------------------------------
+# Tie-break inside a severity band: operational urgency, flood before drought.
+_PATTERN_PRIORITY = {
+    "levee_threshold_crossed": 0,
+    "downstream_near_channel_limit": 1,
+    "inflow_curve_rising": 2,
+    "storage_accumulating": 3,
+    "compound_flood_drought": 4,
+    "esp_climatology_tail": 5,
+    "et_suppressed_below_pet": 6,
+    "soil_moisture_declining": 7,
+    "rain_without_recharge": 8,
+    "no_rainfall_input": 9,
+    "inflow_receding": 10,
+    "surcharge_headroom": 11,
+    "firo_buffer_opening": 12,
+    "soil_moisture_holding": 13,
+}
+
+
+@dataclass
+class Pattern:
+    """One thing the computed data shows, with the arithmetic behind it."""
+    key: str            # stable id
+    label: str          # short human label
+    detail: str         # the evidence, with numbers, past or present tense
+    severity: str       # safe | watch | warning | critical
+    basis: str          # the state fields it was computed from
+    audience: str = "all"   # all | farmer | dam | disaster
+
+
+def detect_patterns(s: BasinState) -> list:
+    """Deterministic patterns in the computed series. Most severe first.
+
+    No model runs here and none is consulted. Each entry is arithmetic over a
+    BasinState that simulate() already produced, which is what makes it safe to
+    put in front of an operator: a pattern is reproducible, a prediction is not.
+    """
+    out: list = []
+    fc = np.asarray(s.fc_inflow, dtype=float)
+    fch = np.asarray(s.fc_hours, dtype=float)
+    sm = np.asarray(s.sm_series, dtype=float)
+
+    # -- inflow curve climbing steeply -----------------------------------
+    if fc.size >= 13 and fch.size == fc.size:
+        i3 = 12                               # fc_hours[12] is +3 h
+        d3 = float(fc[i3] - fc[0])
+        h3 = float(fch[i3] - fch[0]) or 3.0
+        if d3 >= 60.0:        # above the calm-basin envelope (normal peaks at 49)
+            out.append(Pattern(
+                "inflow_curve_rising", "Inflow curve climbing steeply",
+                f"The computed inflow curve rises {d3:.0f} m³/s across its first "
+                f"{h3:.0f} hours, from {fc[0]:.0f} to {fc[i3]:.0f} m³/s "
+                f"({d3 / h3:.0f} m³/s per hour).",
+                _tier(d3, 60, 200, 500), "fc_inflow, fc_hours", "dam"))
+
+    # -- the crest is behind us ------------------------------------------
+    if fc.size >= 2:
+        drop = float(fc[0] - fc[-1])
+        if int(fc.argmax()) == 0 and drop >= 60.0:
+            tail = " The engine's past-peak flag is set." if s.past_peak else ""
+            out.append(Pattern(
+                "inflow_receding", "Inflow crest has passed",
+                f"The highest ordinate in the computed inflow curve is the present "
+                f"value of {fc[0]:.0f} m³/s, and the curve falls {drop:.0f} m³/s "
+                f"across the stored {float(fch[-1]):.0f}-hour window.{tail}",
+                "watch" if fc[0] > SAFE_CHANNEL else "safe",
+                "fc_inflow, past_peak", "dam"))
+
+    # -- release below inflow, so storage is accumulating ----------------
+    surplus = s.inflow_now - s.release_now
+    if surplus >= BASE_RELEASE:    # gaining a full normal release per hour or more
+        net = surplus * MS_TO_AFT_PER_H
+        hrs = s.buffer_now_aft / net if net > 0 else float("inf")
+        sev = _tier(surplus, BASE_RELEASE, 2 * BASE_RELEASE,
+                    SAFE_CHANNEL - BASE_RELEASE)
+        if s.spilling:
+            sev = "critical"
+        out.append(Pattern(
+            "storage_accumulating", "Release below inflow, storage rising",
+            f"Release is {s.release_now:.0f} m³/s against an inflow of "
+            f"{s.inflow_now:.0f} m³/s, a surplus of {surplus:.0f} m³/s, so storage "
+            f"gains {net:.0f} acre-ft per hour; the {s.buffer_now_aft:,.0f} "
+            f"acre-ft of headroom left at {s.reservoir_pct:.1f}% full covers "
+            f"{hrs:.0f} hours of that surplus.",
+            sev, "inflow_now, release_now, buffer_now_aft, spilling", "dam"))
+
+    # -- pre-release is opening buffer (the good-news case) --------------
+    if surplus < -5.0:          # -5 m³/s deadband so a near balance cannot flicker
+        draw = -surplus * MS_TO_AFT_PER_H
+        out.append(Pattern(
+            "firo_buffer_opening", "Pre-release is opening buffer",
+            f"Release of {s.release_now:.0f} m³/s exceeds inflow of "
+            f"{s.inflow_now:.0f} m³/s by {-surplus:.0f} m³/s, so storage is drawing "
+            f"down {draw:.0f} acre-ft per hour and headroom has grown to "
+            f"{s.buffer_now_aft:,.0f} acre-ft.",
+            "safe", "release_now, inflow_now, buffer_now_aft", "dam"))
+
+    # -- downstream flow against the two published limits ----------------
+    if s.q_downstream >= 0.75 * SAFE_CHANNEL:
+        pct = 100.0 * s.q_downstream / SAFE_CHANNEL
+        side = "above" if s.q_downstream > LEVEE_Q else "below"
+        out.append(Pattern(
+            "downstream_near_channel_limit", "Downstream flow at the channel limit",
+            f"Downstream flow is {s.q_downstream:.0f} m³/s, {pct:.0f}% of the "
+            f"{SAFE_CHANNEL:.0f} m³/s safe channel capacity and "
+            f"{abs(s.q_downstream - LEVEE_Q):.0f} m³/s {side} the {LEVEE_Q:.0f} "
+            f"m³/s levee threshold.",
+            _tier(s.q_downstream, 0.75 * SAFE_CHANNEL, SAFE_CHANNEL, LEVEE_Q),
+            "q_downstream", "disaster"))
+
+    # -- the levee threshold is crossed inside the stored curve ----------
+    if s.overtop_depth > 0.0:
+        if not math.isfinite(s.time_to_overtop_min):
+            when = ""
+        elif s.time_to_overtop_min < 1.0:
+            when = (" The curve is already above that threshold at its present "
+                    "ordinate.")
+        else:
+            when = (f" The first ordinate above that threshold sits "
+                    f"{s.time_to_overtop_min:.0f} min along the stored curve.")
+        out.append(Pattern(
+            "levee_threshold_crossed",
+            "Levee threshold crossed in the computed curve",
+            f"The computed downstream-flow curve peaks above the {LEVEE_Q:.0f} m³/s "
+            f"levee threshold; the stage computed from that peak stands "
+            f"{s.overtop_depth:.2f} m over the crest, which places "
+            f"{s.households_at_risk:,} of {HH_TOTAL:,} households inside the mapped "
+            f"low-lying zone.{when}",
+            # 0.1 / 0.35 m mirror simulate()'s own households_at_risk cuts, so this
+            # severity and that household count can never contradict each other.
+            "critical" if s.overtop_depth > 0.35
+            else ("warning" if s.overtop_depth > 0.1 else "watch"),
+            "overtop_depth, time_to_overtop_min, households_at_risk", "disaster"))
+
+    # -- the soil-moisture trajectory ------------------------------------
+    drying = False
+    if sm.size >= 2:              # sm_series holds a single point at tick 0
+        mono = bool(np.all(np.diff(sm) <= 1e-12))
+        total = float(sm[0] - sm[-1])
+        span = float(sm.size - 1)
+        days = np.asarray(s.sm_days, dtype=float)
+        if days.size == sm.size and float(days[-1] - days[0]) > 0:
+            span = float(days[-1] - days[0])
+        # 0.002 m³/m³ is 1.2 mm over the root zone: above float noise, below any
+        # signal an agronomist would act on.
+        drying = mono and total >= 0.002
+        if drying:
+            frac = total / (THETA_FC - THETA_WP)
+            steps = sm.size - 1
+            out.append(Pattern(
+                "soil_moisture_declining", "Soil moisture falling at every step",
+                f"Root-zone moisture has fallen at every one of the {steps} "
+                f"{_plural(steps, 'step', 'steps')} in the stored trajectory, from "
+                f"{sm[0]:.3f} to {sm[-1]:.3f} m³/m³ over {span:.0f} "
+                f"{_plural(span, 'day', 'days')} ({total * ROOT_DEPTH_MM:.0f} mm of "
+                f"water, {100 * frac:.0f}% of the plant-available range).",
+                _tier(frac, 0.0, 0.20, 0.40), "sm_series, sm_days", "farmer"))
+        elif mono and s.soil_moisture >= 0.95 * THETA_FC:
+            gap = (THETA_FC - s.soil_moisture) * ROOT_DEPTH_MM
+            where = "exactly at" if gap < 0.5 else f"within {gap:.0f} mm of"
+            out.append(Pattern(
+                "soil_moisture_holding", "Soil moisture holding at field capacity",
+                f"Root-zone moisture has held at {s.soil_moisture:.3f} m³/m³ across "
+                f"all {sm.size} points of the stored trajectory, {where} the "
+                f"{THETA_FC:.2f} m³/m³ field capacity.",
+                "safe", "sm_series, soil_moisture", "farmer"))
+
+    # -- actual water use suppressed below demand ------------------------
+    deficit = s.pet - s.et_actual
+    if deficit >= 1.5 and s.pet > 0:    # 1.5 mm/day is 20% of the baseline PET
+        out.append(Pattern(
+            "et_suppressed_below_pet", "Actual water use suppressed below demand",
+            f"Actual evapotranspiration is {s.et_actual:.1f} mm/day against "
+            f"atmospheric demand of {s.pet:.1f} mm/day, a shortfall of "
+            f"{deficit:.1f} mm/day, so the soil is meeting only "
+            f"{100.0 * s.et_actual / s.pet:.0f}% of demand at {s.temp:.1f} °C.",
+            _tier(deficit, 1.5, 3.0, 5.0), "et_actual, pet, temp", "farmer"))
+
+    # -- evaporative stress in the climatological dry tail ---------------
+    if s.esp < 50.0 and s.pet > 0:      # cuts mirror simulate()'s drought ladder
+        out.append(Pattern(
+            "esp_climatology_tail", "Evaporative stress in the dry tail",
+            f"The evaporative stress ratio of {s.esr:.2f} sits at the {s.esp:.0f}th "
+            f"percentile of the basin climatology (mean {ESR_CLIM_MU:.2f}, sd "
+            f"{ESR_CLIM_SD:.2f}), drier than {100.0 - s.esp:.0f}% of the historical "
+            f"record.",
+            _tier(-s.esp, -50.0, -30.0, -10.0), "esp, esr", "farmer"))
+
+    # -- both hazards elevated in one state ------------------------------
+    if s.flood_sev != "safe" and s.drought_sev != "safe":
+        out.append(Pattern(
+            "compound_flood_drought", "Both hazards elevated in the same state",
+            f"The flood severity computed from the inflow peak of "
+            f"{s.inflow_peak:.0f} m³/s reads '{s.flood_sev}' while the drought "
+            f"severity computed from the {s.esp:.0f}th-percentile stress reading "
+            f"reads '{s.drought_sev}' — one basin, both hazards above normal in the "
+            f"same computed state.",
+            "critical" if "critical" in (s.flood_sev, s.drought_sev) else "warning",
+            "flood_sev, drought_sev, inflow_peak, esp"))
+
+    # -- rainfall against recharge (two mutually exclusive keys) ---------
+    if drying and s.rain_now >= 0.5:
+        out.append(Pattern(
+            "rain_without_recharge", "Rain falling while the soil keeps drying",
+            f"Catchment rainfall is {s.rain_now:.1f} mm/hr, yet root-zone moisture "
+            f"fell at every step of the stored trajectory to {s.soil_moisture:.3f} "
+            f"m³/m³ — the runoff reaching the reservoir ({s.inflow_now:.0f} m³/s) "
+            f"has not recharged the root zone.",
+            "warning", "rain_now, sm_series, inflow_now", "farmer"))
+    elif drying and s.rain_now < 0.15:  # below a tipping-bucket gauge's resolution
+        out.append(Pattern(
+            "no_rainfall_input", "No rainfall input while the soil dries",
+            f"Catchment rainfall reads {s.rain_now:.2f} mm/hr with root-zone "
+            f"moisture down to {s.soil_moisture:.3f} m³/m³ — the root zone has taken "
+            f"no recharge across the stored {sm.size}-point trajectory.",
+            "warning" if s.esp < 30 else "watch",
+            "rain_now, sm_series, soil_moisture", "farmer"))
+
+    # -- headroom against the surcharge the hydrograph requires ----------
+    # The mass-balance statement, as a ratio of two computed volumes. It never
+    # claims a spill happens; it reports how many times over the room exists.
+    if s.target_buffer_aft > 0 and (not s.past_peak
+                                    or s.reservoir_pct >= 85.0 or s.spilling):
+        ratio = s.buffer_now_aft / s.target_buffer_aft
+        sev = ("critical" if (s.spilling or ratio < 1.0) else
+               "warning" if ratio < 2.0 else
+               "watch" if ratio < 4.0 else "safe")
+        out.append(Pattern(
+            "surcharge_headroom", "Headroom against the required surcharge",
+            f"The reservoir holds {s.buffer_now_aft:,.0f} acre-ft of headroom at "
+            f"{s.reservoir_pct:.1f}% full against the {s.target_buffer_aft:,.0f} "
+            f"acre-ft the computed inflow hydrograph puts above the "
+            f"{SAFE_CHANNEL:.0f} m³/s safe channel — {ratio:.1f} times the volume "
+            f"required.",
+            sev, "buffer_now_aft, target_buffer_aft, reservoir_pct", "dam"))
+
+    out.sort(key=lambda p: (_SEV_RANK.get(p.severity, 9),
+                            _PATTERN_PRIORITY.get(p.key, 99)))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 2. MITIGATION — measures the AI may suggest, and nothing else
+#
+# A catalogue, not a generator. The AI selects from this table and phrases what
+# it selected; it cannot add a measure, because a measure that is not in the
+# table is not in the candidate set the UI renders. That is the whole guarantee.
+#
+# Every `trigger` is a predicate over a BasinState the engine already computed,
+# so a measure appears exactly when its condition holds and an operator can
+# always be told which reading put it on screen.
+#
+# On `authority`: these name the family of guidance a measure is drawn from —
+# the issuing body and the subject — not a clause number, because a clause
+# reference this project has not verified would be worse than none. They are
+# citations in the same sense as the directive cards' "Aligned to IMD advisory
+# protocol": they say where the practice comes from, and they are not an
+# external certification of this software. Measures marked "general practice"
+# are standard control-room or field practice for which no single guideline is
+# cited here.
+#
+# Wording rule, enforced by review: every `action` is an instruction about what
+# to DO. None states or forecasts a hazard. The engine does that, above.
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class Mitigation:
+    key: str            # stable id
+    role: str           # farmer | dam | disaster | public
+    hazard: str         # flood | drought | both
+    action: str         # the measure, imperative, one sentence
+    horizon: str        # now | next 6 hours | next 24 hours | this week
+    because: str        # the reading that put it on screen
+    authority: str      # the guidance family it is drawn from
+
+
+# Predicates are kept beside the table rather than inlined so the table stays
+# readable and each condition can be checked against one engine field.
+def _flood_live(s) -> bool:
+    return s.flood_sev in ("watch", "warning", "critical")
+
+
+def _flood_bad(s) -> bool:
+    return s.flood_sev in ("warning", "critical")
+
+
+def _dry_live(s) -> bool:
+    return s.drought_sev in ("watch", "warning", "critical")
+
+
+def _dry_bad(s) -> bool:
+    return s.drought_sev in ("warning", "critical")
+
+
+MITIGATIONS: tuple = (
+    # ---- farmer, drought ------------------------------------------------
+    Mitigation("mulch_bare_soil", "farmer", "drought",
+               "Mulch the rows you are not watering — covered soil holds what "
+               "it has, bare soil gives it to the air.",
+               "this week", "root-zone moisture is falling on every reading",
+               "ICAR drought contingency planning"),
+    Mitigation("stage_priority", "farmer", "drought",
+               "Water the flowering and fruiting plots first; a plot at a "
+               "vegetative stage recovers from a missed turn, a flowering one "
+               "does not.",
+               "now", "evaporative stress is in the dry tail",
+               "ICAR drought contingency planning"),
+    Mitigation("defer_topdress", "farmer", "drought",
+               "Hold the next fertiliser top-dressing until the crop is "
+               "drinking again — salts concentrate in a dry root zone.",
+               "this week", "actual water use is suppressed below demand",
+               "ICAR drought contingency planning"),
+    Mitigation("channel_turns", "farmer", "drought",
+               "Agree a turn order with the other plots on your channel so the "
+               "belt draws the water down in sequence rather than all at once.",
+               "this week", "evaporative stress is in the dry tail",
+               "general practice"),
+    Mitigation("livestock_water", "farmer", "drought",
+               "Fill and cover the livestock trough while the channel is still "
+               "running, and check the fodder stock against the days you have.",
+               "next 24 hours", "root-zone moisture is falling on every reading",
+               "NDMA guidelines on drought management"),
+    Mitigation("defer_sowing", "farmer", "drought",
+               "Hold back any remaining sowing until the root zone has taken "
+               "recharge; seed in dry soil is seed spent twice.",
+               "this week", "the root zone has taken no recharge",
+               "ICAR drought contingency planning"),
+    Mitigation("check_drip", "farmer", "drought",
+               "Clear the drip filters and the field channel now — a blocked "
+               "line is only ever discovered when it is needed.",
+               "this week", "the drought side is quiet enough to do maintenance",
+               "general practice"),
+    # ---- farmer, flood --------------------------------------------------
+    Mitigation("field_drainage", "farmer", "flood",
+               "Open the field drains and clear the outfall so standing water "
+               "has somewhere to go.",
+               "now", "downstream flow is at the channel limit",
+               "NDMA guidelines on flood management"),
+    Mitigation("lift_pumpset", "farmer", "flood",
+               "Lift the pumpset, motor and any stored fertiliser off the floor "
+               "and above the bank line.",
+               "now", "the levee threshold is crossed in the computed curve",
+               "general practice"),
+    Mitigation("harvest_ahead", "farmer", "flood",
+               "Bring in whatever is ready to cut, even under-ripe — a part "
+               "harvest beats a submerged one.",
+               "next 6 hours", "the levee threshold is crossed in the computed curve",
+               "NDMA guidelines on flood management"),
+    Mitigation("move_livestock_high", "farmer", "flood",
+               "Move livestock to the highest ground on the zone list before "
+               "the access road is cut, not after.",
+               "now", "households are inside the mapped low-lying zone",
+               "NDMA guidelines on flood management"),
+    # ---- dam, flood -----------------------------------------------------
+    Mitigation("warn_before_gate", "dam", "flood",
+               "Sound the downstream siren line and send the village roster its "
+               "message before the first gate moves, not with it.",
+               "now", "a release change is scheduled",
+               "CWC reservoir operation practice"),
+    Mitigation("gate_standby", "dam", "flood",
+               "Put the radial gates on standby and prove the hoist power and "
+               "the manual override on each one.",
+               "now", "the inflow curve is climbing steeply",
+               "Standard dam-safety operating practice"),
+    Mitigation("clear_spillway", "dam", "flood",
+               "Walk and clear the spillway channel and the approach of debris "
+               "and vegetation.",
+               "next 6 hours", "the inflow curve is climbing steeply",
+               "Standard dam-safety operating practice"),
+    Mitigation("confirm_gauges", "dam", "flood",
+               "Confirm every downstream gauge is reporting before you rely on "
+               "it to tell you the release landed.",
+               "now", "downstream flow is at the channel limit",
+               "CWC reservoir operation practice"),
+    Mitigation("second_operator", "dam", "flood",
+               "Put a second operator on the far-bank radio for the whole "
+               "release, so a gate reading is never one person's word.",
+               "now", "a release change is scheduled",
+               "general practice"),
+    Mitigation("walk_channel", "dam", "flood",
+               "Walk the channel, the sandbars and the pumping-station apron "
+               "between the dam and the first settlement before any gate moves.",
+               "next 6 hours", "downstream flow is at the channel limit",
+               "general practice"),
+    Mitigation("photo_tailrace", "dam", "flood",
+               "Photograph the tailrace and the first bridge pier before the "
+               "release and again after — it is the only before-and-after "
+               "anyone will have.",
+               "now", "a release change is scheduled",
+               "general practice"),
+    Mitigation("log_surcharge", "dam", "flood",
+               "Log the surcharge volume and the gate times against the rule "
+               "curve as you go; a reconstructed log is not a log.",
+               "now", "storage is rising against the required surcharge",
+               "CWC reservoir operation practice"),
+    Mitigation("inspect_freeboard", "dam", "flood",
+               "Inspect the freeboard and the upstream face for seepage or "
+               "settlement while the level is high.",
+               "next 24 hours", "storage is rising against the required surcharge",
+               "Standard dam-safety operating practice"),
+    # ---- dam, drought ---------------------------------------------------
+    Mitigation("ration_release", "dam", "drought",
+               "Set the release against the committed downstream demand for the "
+               "whole dry spell rather than week by week.",
+               "this week", "evaporative stress is in the dry tail",
+               "CWC reservoir operation practice"),
+    Mitigation("audit_losses", "dam", "drought",
+               "Audit conveyance losses on the main canal — in a dry spell the "
+               "cheapest water available is the water already being lost.",
+               "this week", "evaporative stress is in the dry tail",
+               "general practice"),
+    # ---- disaster, flood ------------------------------------------------
+    Mitigation("vulnerable_first", "disaster", "flood",
+               "Start with the people who cannot start themselves — the ward's "
+               "bed-bound list, the anganwadi roll, anyone without a vehicle. "
+               "They set the clock, not the fit.",
+               "now", "households are inside the mapped low-lying zone",
+               "NDMA guidelines on incident response"),
+    Mitigation("cut_power", "disaster", "flood",
+               "Cut power and isolate the pumping station in the lowest zone "
+               "before the water, not after; a live line in standing water "
+               "closes the street to the rescue too.",
+               "now", "the levee threshold is crossed in the computed curve",
+               "NDMA guidelines on flood management"),
+    Mitigation("back_marker", "disaster", "flood",
+               "Send a back-marker through each street behind the main move and "
+               "mark the door, so \"cleared\" means someone looked.",
+               "now", "households are inside the mapped low-lying zone",
+               "NDMA guidelines on incident response"),
+    Mitigation("stage_boats", "disaster", "flood",
+               "Pre-position boats and rescue crews on the high-ground side of "
+               "the route, not inside the zone they will be recovering from.",
+               "now", "downstream flow is at the channel limit",
+               "NDMA guidelines on flood management"),
+    Mitigation("close_road", "disaster", "flood",
+               "Close and physically block the riverside access road — a sign "
+               "is not a closure once a driver can see water on both sides.",
+               "now", "the levee threshold is crossed in the computed curve",
+               "NDMA guidelines on flood management"),
+    Mitigation("shelter_provision", "disaster", "flood",
+               "Check the assembly points your district plan designates have "
+               "drinking water, light and a working generator before anyone "
+               "arrives at them.",
+               "next 6 hours", "an evacuation is in the directive above",
+               "NDMA guidelines on incident response"),
+    Mitigation("livestock_route", "disaster", "flood",
+               "Move livestock ahead of people where a route is shared — they "
+               "move slowest and they block what follows.",
+               "now", "households are inside the mapped low-lying zone",
+               "NDMA guidelines on flood management"),
+    Mitigation("time_the_route", "disaster", "flood",
+               "Drive the evacuation route once and time it; the number you "
+               "will want later is the one nobody has written down.",
+               "this week", "the flood side is quiet enough to rehearse",
+               "general practice"),
+    # ---- disaster, drought ----------------------------------------------
+    Mitigation("water_tankers", "disaster", "drought",
+               "Confirm the tanker schedule and the source for the habitations "
+               "that run dry first, before the requests arrive.",
+               "next 24 hours", "evaporative stress is in the dry tail",
+               "NDMA guidelines on drought management"),
+    Mitigation("fodder_depot", "disaster", "drought",
+               "Pre-position fodder and drinking water at the cattle camps "
+               "rather than waiting for the camps to ask.",
+               "this week", "root-zone moisture is falling on every reading",
+               "NDMA guidelines on drought management"),
+    # ---- public, both ---------------------------------------------------
+    Mitigation("no_moving_water", "public", "flood",
+               "Do not walk or drive through moving water, whatever its depth — "
+               "a foot of it carries a car.",
+               "now", "households are inside the mapped low-lying zone",
+               "NDMA guidelines on flood management"),
+    Mitigation("documents_meds", "public", "flood",
+               "Put documents, medicines and a phone charger in one bag you can "
+               "carry in one hand.",
+               "now", "an evacuation is in the directive above",
+               "NDMA guidelines on incident response"),
+    Mitigation("boil_water", "public", "flood",
+               "Boil or treat drinking water once the river has been over the "
+               "bank; the supply is the second hazard.",
+               "next 24 hours", "the levee threshold is crossed in the computed curve",
+               "NDMA guidelines on flood management"),
+    Mitigation("store_water", "public", "drought",
+               "Store drinking water in covered containers while the supply is "
+               "still on its normal schedule.",
+               "this week", "evaporative stress is in the dry tail",
+               "NDMA guidelines on drought management"),
+)
+
+# key -> predicate. Kept separate from the frozen dataclass so the table stays
+# data and the conditions stay code.
+_MIT_TRIGGER = {
+    "mulch_bare_soil": _dry_live,
+    "stage_priority": _dry_bad,
+    "defer_topdress": _dry_bad,
+    "channel_turns": _dry_live,
+    "livestock_water": _dry_bad,
+    "defer_sowing": lambda s: _dry_bad(s) and s.rain_now < 0.15,
+    "check_drip": lambda s: not _dry_live(s),
+    "field_drainage": lambda s: s.q_downstream >= 0.75 * SAFE_CHANNEL,
+    "lift_pumpset": lambda s: s.overtop_depth > 0.0,
+    "harvest_ahead": lambda s: s.overtop_depth > 0.1,
+    "move_livestock_high": lambda s: s.households_at_risk > 0,
+    "warn_before_gate": lambda s: abs(s.firo_release - s.release_now) > 5.0,
+    "gate_standby": _flood_live,
+    "clear_spillway": _flood_live,
+    "confirm_gauges": lambda s: s.q_downstream >= 0.75 * SAFE_CHANNEL,
+    "second_operator": lambda s: abs(s.firo_release - s.release_now) > 5.0,
+    "walk_channel": lambda s: s.q_downstream >= 0.75 * SAFE_CHANNEL,
+    "photo_tailrace": lambda s: abs(s.firo_release - s.release_now) > 5.0,
+    "log_surcharge": lambda s: s.flood_mode,
+    "inspect_freeboard": lambda s: s.reservoir_pct >= 78.0 and _flood_live(s),
+    "ration_release": _dry_bad,
+    "audit_losses": _dry_live,
+    "vulnerable_first": lambda s: s.households_at_risk > 0,
+    "cut_power": lambda s: s.overtop_depth > 0.1,
+    "back_marker": lambda s: s.households_at_risk > 0,
+    "stage_boats": lambda s: s.q_downstream >= 0.75 * SAFE_CHANNEL,
+    "close_road": lambda s: s.overtop_depth > 0.1,
+    "shelter_provision": lambda s: s.households_at_risk > 0,
+    "livestock_route": lambda s: s.households_at_risk > 0,
+    "time_the_route": lambda s: not _flood_live(s),
+    "water_tankers": _dry_bad,
+    "fodder_depot": _dry_bad,
+    "no_moving_water": lambda s: s.households_at_risk > 0,
+    "documents_meds": lambda s: s.households_at_risk > 0,
+    "boil_water": lambda s: s.overtop_depth > 0.1,
+    "store_water": _dry_live,
+}
+
+# Urgency order for presentation. "now" first: a card that opens on a weekly
+# measure during an evacuation has buried the thing that matters.
+_HORIZON_RANK = {"now": 0, "next 6 hours": 1, "next 24 hours": 2,
+                 "this week": 3}
+
+
+def mitigations(s: BasinState, role: str | None = None,
+                limit: int = 0) -> list:
+    """The measures that apply to this state, most urgent first.
+
+    ``role`` filters to one desk; a farmer card never shows gate practice.
+    ``limit`` caps the list, because a card with eleven bullets is a card
+    nobody reads. Returns the catalogue entries themselves, so a caller can
+    only ever display a measure that exists in ``MITIGATIONS``.
+    """
+    out = []
+    for m in MITIGATIONS:
+        if role is not None and m.role != role:
+            continue
+        trigger = _MIT_TRIGGER.get(m.key)
+        try:
+            if trigger is None or not trigger(s):
+                continue
+        except Exception:                               # pragma: no cover
+            continue
+        out.append(m)
+    out.sort(key=lambda m: _HORIZON_RANK.get(m.horizon, 9))
+    return out[:limit] if limit else out
+
+
+# ---------------------------------------------------------------------------
+# 3. WHERE TO GO — an order of movement, and criteria for the destination
+#
+# This console deliberately does NOT name a destination, and the reason is
+# worth stating plainly because the alternative looks more impressive:
+#
+#   * The only candidate places in the data are the three zones a basin is
+#     evacuated FROM, carrying elevation *labels* ("538 m") that are the demo
+#     basin's figures reused verbatim for every region and never parsed as
+#     numbers anywhere.
+#   * The highest of those three is still a zone the app's own time-to-impact
+#     banding paints critical once the levee goes, because it carries a finite
+#     arrival delay. It is not a refuge.
+#   * ``shelter_phrase`` is a sentence template over a region name. In live mode
+#     it asserts a designated district facility this software has never checked.
+#
+# So naming a place would mean inventing one. What CAN be computed honestly is
+# the order in which zones must move — time to impact plus each zone's own
+# delay, which is real arithmetic over real engine output — together with the
+# criteria a destination has to meet, and a handoff to the authority that holds
+# the shelter register. In the scripted demo the curated basin may name its own
+# shelter, because there the geography is part of the script.
+# ---------------------------------------------------------------------------
+@dataclass
+class EvacStep:
+    """One zone's place in the order of movement."""
+    order: int          # 1 = moves first
+    name: str
+    zone: str
+    households: int
+    minutes: float      # time to impact for this zone; inf = none computed
+    severity: str       # from the engine's own time-to-impact banding
+
+
+# What a destination has to satisfy. Criteria, not coordinates — every one of
+# these is checkable by a person standing in the place, which is the point.
+DESTINATION_CRITERIA = (
+    "Uphill and away from the river, not merely further along the bank.",
+    "A building your district plan already designates — a school, community "
+    "hall or municipal building — not a structure chosen on the day.",
+    "Reachable without crossing the floodplain or any water already moving.",
+    "Able to take livestock and vehicles as well as people, or paired with "
+    "somewhere that can.",
+)
+
+DESTINATION_HANDOFF = (
+    "Confirm the specific site against your district disaster-management plan. "
+    "This console holds the basin's hydrology, not its shelter register."
+)
+
+
+def evacuation_order(s: BasinState, place: "Place | None" = None) -> list:
+    """The zones in the order they must move. Computed, not advised.
+
+    Each zone's time to impact is the basin's own ``time_to_overtop_min`` plus
+    the delay the zone list carries for it, which is the same arithmetic the
+    disaster tab's zone table already does — so this cannot disagree with it.
+    """
+    if place is None:
+        place = DEMO_PLACE
+    tto = s.time_to_overtop_min
+    rows = []
+    for z in place.sectors:
+        if z.get("households") is not None:
+            hh = int(z["households"])
+        else:
+            hh = int(round(s.households_at_risk * float(z.get("share", 0.0))))
+        mins = (tto + float(z.get("delay", 0.0))
+                if math.isfinite(tto) else float("inf"))
+        rows.append({"name": str(z.get("name", "")), "zone": str(z.get("zone", "")),
+                     "hh": hh, "mins": mins})
+    rows.sort(key=lambda r: (r["mins"], -r["hh"]))
+    out = []
+    for i, r in enumerate(rows, start=1):
+        if not math.isfinite(r["mins"]):
+            sev = "safe"
+        elif r["mins"] <= 100:
+            sev = "critical"
+        elif r["mins"] <= 120:
+            sev = "warning"
+        else:
+            sev = "watch"
+        out.append(EvacStep(i, r["name"], r["zone"], r["hh"], r["mins"], sev))
+    return out
+
+
+def safe_guidance(s: BasinState, place: "Place | None" = None,
+                  scripted: bool = False) -> dict:
+    """Where to go: the order, the criteria, and who owns the shelter register.
+
+    ``scripted`` is True only for the curated demo basin, whose geography is
+    part of the script and may therefore be named. In live mode the named site
+    is withheld — see this section's header for why that is the honest choice
+    rather than a missing feature.
+    """
+    if place is None:
+        place = DEMO_PLACE
+    steps = evacuation_order(s, place)
+    moving = [st for st in steps if math.isfinite(st.minutes) and st.households > 0]
+    return {
+        "lead_minutes": s.time_to_overtop_min,
+        "households": int(s.households_at_risk or 0),
+        "steps": steps,
+        "moving": moving,
+        "criteria": list(DESTINATION_CRITERIA),
+        "handoff": DESTINATION_HANDOFF,
+        "named": place.shelter_phrase if scripted else None,
+        "active": bool(moving),
+    }

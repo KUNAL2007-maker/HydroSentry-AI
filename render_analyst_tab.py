@@ -74,7 +74,7 @@ def analyst_blocks(all_bodies: list) -> list:
     written in render_analyst and _render_comparison.
     """
     start = next((i for i, b in enumerate(all_bodies)
-                  if "AI support" in b), None)
+                  if "AI assistance" in b), None)
     if start is None:
         return []
     end = next((i for i, b in enumerate(all_bodies)

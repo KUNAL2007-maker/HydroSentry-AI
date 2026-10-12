@@ -26,6 +26,22 @@ Two things are checked here that cannot be checked any other way:
   state with no key and no network, an out-of-scope question is declined rather
   than guessed, the harness reports every stage, and the closing speed
   comparison still admits which of its two figures was measured here.
+* **Test P** — the instrument itself. Every negative check in this file is only
+  as good as ``page_text``, and ``page_text`` used to miss ``st.code`` entirely
+  — at one point 3622 characters of verbatim prompt text sat on the page with
+  no check in this file able to see them. ``test_p`` renders a throwaway app
+  that writes one marker into every element kind and asserts the harvest finds
+  each one, so the harness is measured before it is trusted.
+* **Test L** — rule 2, *no implementation plumbing in the UI*: no model id, no
+  prompt text, no call count, no token figure, no budget number, no API-key
+  instruction and no apology for the language layer being absent.
+* **Test M** — rule 1, *the AI may not state or forecast a hazard*: only
+  ``hydro_engine`` does that. The language layer's wording never reaches the
+  page when it names a hazard, every mitigation shown is a catalogue entry,
+  every alert shown is a detected pattern, and no safe destination is invented.
+* **Test Z** — meta-checks on this file: the stub transport's signature must
+  track the real ``complete()``, and a string asserted *absent* must be
+  asserted *present* somewhere, or the absence check measures nothing.
 
 The live feed is stubbed with a fixed observation so the run is offline and
 deterministic; the browser-side JS fetch is disabled through the app's own
@@ -36,9 +52,11 @@ Run:  python verify_app.py      Exit: 0 = all passed, 1 = at least one failed.
 
 from __future__ import annotations
 
+import inspect
 import os
 import re
 import sys
+import tempfile
 import time
 from datetime import datetime
 
@@ -123,16 +141,146 @@ def exc_text(at) -> str:
     return " | ".join(str(e.value) for e in at.exception)
 
 
+# ---------------------------------------------------------------------------
+# The instrument: everything the page rendered
+# ---------------------------------------------------------------------------
+#
+# ``page_text`` used to enumerate seven typed accessors (markdown, caption,
+# text, info, warning, error, success). That is the wrong shape for a file whose
+# strongest checks are *negative*: an absence check over a harvest that cannot
+# see an element kind is not a weak check, it is no check at all. ``st.code``
+# was the one that bit — a prompt dump of 3622 characters sat on the page and
+# nothing here could see it.
+#
+# So the harvest is now a recursive walk of the element tree instead of a list
+# of accessors, which means a kind nobody thought of is picked up for free.
+# What that walk can and cannot reach was measured against the installed
+# Streamlit (1.64) rather than assumed:
+#
+# REACHED, as elements, by the walk and by the typed accessors alike —
+#   markdown, caption, text, code, metric, header, subheader, title, table,
+#   dataframe, json, latex, divider, info, warning, error, success.
+#   Nesting is not a barrier: elements written inside ``st.expander``,
+#   ``st.columns``, ``st.tabs`` and ``st.container`` are returned exactly as
+#   top-level ones are, and ``at.markdown`` et al. include the *sidebar* too
+#   (the walk therefore covers ``at.main`` and ``at.sidebar`` and no more).
+#
+# REACHED ONLY BY THE WALK — these have no typed accessor at all, so the old
+# harvest was blind to every one of them:
+#   * ``st.expander`` labels. The brief's suspicion is confirmed: an expander
+#     label is a property of a *block*, not an element, so no accessor returns
+#     it. A tree walk does reach it, as ``Expander.label`` — which is strictly
+#     better than the note in J5 below used to claim, and the reason this is a
+#     walk. Tab labels (``Tab.label``) are the same shape.
+#   * ``st.metric`` labels and deltas. ``Metric.value`` is the figure *only*;
+#     the label and the delta are separate properties, absent from ``dir()``
+#     but present on the node. All three are harvested.
+#   * widget labels (button, slider, radio, selectbox, text_input, …), which is
+#     where a "Dump the prompt" control would announce itself.
+#   * ``st.html``, which lands as an ``UnknownElement`` whose ``.value`` is the
+#     raw markup.
+#
+# NOT REACHED, and worth stating so nothing is asserted against them:
+#   * anything inside a Plotly or PyDeck figure. Those are ``UnknownElement``s
+#     whose ``.value`` raises; their payload is in ``.proto.spec``, which
+#     ``gauge_values`` below reads separately for the reservoir gauge.
+#   * ``st.spinner`` / ``st.form`` chrome, and ``st.set_page_config`` metadata.
+#   * CSS is *not* excluded — ``app.py`` ships its stylesheet through
+#     ``st.markdown``, so the harvest contains the whole ``<style>`` block.
+#     That is honest (it really is on the page) but it is why the numeric leak
+#     probes in ``test_l`` are contextual: bare "18" and "500" occur in
+#     ``rgba(18,59,84,…)`` and in a font-weight list.
+#
+# Widget *values* are deliberately dropped unless they are strings: a button's
+# value is ``False`` and a slider's is ``78``, which is session state rather
+# than page copy, and a bare "78" in the harvest would weaken every numeric
+# probe for nothing.
+def _kids(node) -> list:
+    """A node's children. AppTest stores them in a dict keyed by position."""
+    children = getattr(node, "children", None)
+    if not children:
+        return []
+    return list(children.values()) if isinstance(children, dict) \
+        else list(children)
+
+
+def _is_widget(node) -> bool:
+    return hasattr(node, "set_value") or hasattr(node, "click") \
+        or hasattr(node, "check")
+
+
 def page_text(at) -> str:
-    """Every string the page rendered (markdown, captions, alerts)."""
+    """Every string the page rendered, from a full walk of the element tree.
+
+    Covers element text, expander/tab labels, widget labels and metric
+    labels/deltas, in the main body and the sidebar. See the block comment
+    above for exactly what this does and does not reach.
+    """
     parts: list[str] = []
-    for kind in ("markdown", "caption", "text", "info", "warning", "error",
-                 "success"):
+
+    def walk(node) -> None:
+        for attr in ("value", "label", "delta"):
+            try:
+                val = getattr(node, attr)
+            except Exception:       # Plotly/PyDeck .value raises; skip it
+                continue
+            if val is None:
+                continue
+            if isinstance(val, str):
+                parts.append(val)
+            elif not _is_widget(node):
+                # Table/Dataframe hand back a DataFrame; render it as text.
+                parts.append(str(val))
+        for child in _kids(node):
+            walk(child)
+
+    for root in (at.main, at.sidebar):
         try:
-            parts += [str(el.value) for el in getattr(at, kind)]
-        except Exception:
-            pass
+            walk(root)
+        except Exception as exc:                        # pragma: no cover
+            parts.append(f"<page_text walk failed: {exc}>")
     return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Absence checks, and the registry that stops them going vacuous
+# ---------------------------------------------------------------------------
+#
+# A prior audit found "Performance at a glance" and "Operational Real-Time
+# Engine Execution" asserted *absent* (H8, J5) and never asserted present
+# anywhere. An absence check for a string the app never renders cannot fail,
+# whatever the app does — it measures the string, not the behaviour. Every
+# absence assertion therefore goes through ``absent()``, every presence
+# assertion through ``present()``, and ``test_z`` holds the two registries
+# against each other at the end of the run.
+ASSERTED_ABSENT: set[str] = set()
+ASSERTED_PRESENT: set[str] = set()
+
+# Strings that are absent *by design* and have no healthy render to appear on:
+# the deleted briefing panel's own copy, and the language layer's internals.
+# A leak probe is not vacuous for being unsatisfiable — being unsatisfiable is
+# the whole claim. They are listed, rather than silently exempted, so the
+# exemption is a decision somebody can read.
+ABSENT_BY_DESIGN: set[str] = set()
+
+
+def absent(text: str, needle: str, by_design: bool = False) -> bool:
+    """``needle not in text``, recorded so test_z can audit the assertion."""
+    ASSERTED_ABSENT.add(needle)
+    if by_design:
+        ABSENT_BY_DESIGN.add(needle)
+    return needle not in text
+
+
+def present(text: str, needle: str) -> bool:
+    """``needle in text``, recorded so test_z can audit the assertion."""
+    ASSERTED_PRESENT.add(needle)
+    return needle in text
+
+
+def missing(text: str, needles) -> list:
+    """The needles that are present — i.e. the leaks. Empty list is a pass."""
+    return [n for n in needles if not absent(text, n)]
 
 
 def widget(at, kind: str, key: str):

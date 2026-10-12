@@ -31,6 +31,7 @@ Run:
 import copy
 import json
 import math
+import re
 import os
 import time
 from datetime import datetime
@@ -1380,7 +1381,7 @@ def render_farmer(s, d, place=None):
             meta=fd["meta"],
             cert=fd["cert"],
         ))
-        render_role_briefing(s, d, "farmer")
+        render_role_support(s, d, "farmer", place)
         st.write("")
         m(h2("Message sent to farmers", "Automatic SMS in Marathi and Hindi"))
         sms = d["sms"]
@@ -1524,7 +1525,7 @@ def render_dam(s, d, place=None):
             meta=dm["meta"],
             cert=dm["cert"],
         ))
-        render_role_briefing(s, d, "dam")
+        render_role_support(s, d, "dam", place)
         st.write("")
         m(h2("Gate schedule", "Planned gate operations across the event"))
         rows_html = ""
@@ -1706,7 +1707,7 @@ def render_disaster(s, d, place=None):
             meta=di["meta"],
             cert=di["cert"],
         ))
-        render_role_briefing(s, d, "disaster")
+        render_role_support(s, d, "disaster", place)
         st.write("")
         m(h2("Affected zones", "Ordered by time to impact"))
         # Zones come from place.sectors, so every basin shows its own geography
@@ -1866,33 +1867,49 @@ def _drought_rule(s) -> tuple:
     return ("esp", f"{s.esp:.1f}", "&ge; 50", "safe")
 
 
-def render_analyst(s, d):
-    """Tab 5 — ask the console a question, and show how the answer was made.
+def render_analyst(s, d, place=None):
+    """Tab 5 — AI assistance: alerts, where to go, and what else to do.
 
-    The ordering on screen is the ordering of trust, the same convention the
-    role tabs use: the answer first, then the fields it was read from, then the
-    harness that decided whether the language model's wording was allowed to
-    stand at all. The engine-validation evidence sits one expander down and the
-    comparison with conventional processing closes the page.
+    The division of labour is the whole design, and it is deliberately the
+    opposite way round from most things called AI. The hazard call belongs to
+    the calculated flow: the physics engine decides whether there is a flood or
+    a drought and how bad it is, and nothing on this tab may restate or
+    second-guess that. What the assistance layer is for is the part the physics
+    does not answer — where people should go, what else is worth doing, and
+    which patterns in the data are worth an operator's attention.
+
+    Each of the three panels below is backed by a computed candidate set:
+    patterns come from deterministic detectors over the stored series,
+    destinations from the basin's own zone list, and measures from a fixed
+    catalogue. The assistance layer chooses among them and words them. It
+    cannot add a measure, invent a place, or report a pattern that did not
+    fire — which is what makes the three panels safe to act on.
+
+    The engine-validation evidence sits one expander down, and the comparison
+    with conventional processing closes the page.
     """
-    m(h2("AI support &amp; analyst",
-         "Ask a question — it is answered from the state this page just computed"))
-    m(note("Ask in plain English and the console answers from its own numbers. "
-           "The question first selects fields <b>by name</b> off the computed "
-           "state; an answer is then built from those fields <b>by rule</b>, "
-           "before any model runs; and only then is the Nugen model handed the "
-           "question and those same fields and asked to say it in sentences. "
-           "Every figure in its reply is checked back against the fields that "
-           "were retrieved, and a reply quoting anything else is withheld — the "
-           "computed answer stands either way. That is why the number you read "
-           "here is the engine's, not the model's.",
-           label="How an answer is produced"))
+    m(h2("AI assistance",
+         "Where to go, what else to do, and what the data has already shown"))
+    m(note("The flood and drought calls on the other tabs are made by the "
+           "physics engine, not by anything on this one — that is the boundary "
+           "this console is built around, and it does not move. What assistance "
+           "adds is the part the physics does not answer: <b>which patterns in "
+           "the data deserve attention</b>, <b>where people and stock should "
+           "go</b>, and <b>what else is worth doing</b> while there is time. "
+           "Each panel below is drawn from a computed set — the detectors that "
+           "fired, the basin's own zone list, and a fixed catalogue of "
+           "measures — so nothing here is invented and nothing here forecasts.",
+           label="What this tab is for"))
     st.write("")
 
+    _render_alerts(s)
+    st.write("")
+    _render_where_to_go(s, place)
+    st.write("")
+    _render_measures(s)
+
+    st.write("")
     _render_ask(s, d)
-
-    st.write("")
-    render_nugen_panel(s, d)
 
     st.write("")
     m(h2("Engine validation", "The measured evidence behind every number above"))
@@ -1902,6 +1919,171 @@ def render_analyst(s, d):
 
     st.write("")
     _render_comparison(s)
+
+
+# ---------------------------------------------------------------------------
+# The three assistance panels
+#
+# Each one renders a computed candidate set. The assistance layer may choose
+# among these and word them; it cannot add a row. That is why these panels are
+# built from the engine's own return values rather than from model output — the
+# worst case is that the prose is plainer than it could have been, never that a
+# measure, a place or a pattern appears that the engine never produced.
+# ---------------------------------------------------------------------------
+# Harness rows that describe the transport rather than check the answer. Hidden
+# from the operator: what wrote a sentence, and what that cost, is not a thing
+# an operator can act on.
+_HARNESS_HIDE = {"Language model", "Wording"}
+
+_ALERT_CAP = 6          # the worst state fires ten; four of those can be critical
+
+
+def _render_alerts(s):
+    """What the computed data has already shown, most serious first.
+
+    This is the "alerts based on the pattern of data" job, and the reason it is
+    trustworthy is that the detection is arithmetic, not inference: each row is
+    a threshold comparison over a series the engine stored, phrased in the past
+    or present tense. None of them projects forward. A pattern is evidence; a
+    forecast would be a claim, and the claims belong to the other tabs.
+    """
+    pats = H.detect_patterns(s)
+    m(h2("Patterns in the data",
+         "Detected by rule over the stored series — most serious first"))
+    if not pats:
+        m(note("No pattern is above its reporting floor on this update. That is "
+               "a statement about the data, not a gap: the detectors ran and "
+               "none of them had anything to say, which on a quiet basin is the "
+               "correct answer.",
+               label="Nothing flagged"))
+        return
+
+    shown = pats[:_ALERT_CAP]
+    m('<div class="hs-scroll"><table class="hs-table"><thead><tr>'
+      '<th>Severity</th><th>What the data shows</th><th>Evidence</th>'
+      '<th>Read from</th>'
+      '</tr></thead><tbody>'
+      + "".join(
+          f'<tr><td>{badge(SEV_LABEL.get(p.severity, p.severity), p.severity)}</td>'
+          f'<td><b>{_esc(p.label)}</b></td>'
+          f'<td>{_esc(p.detail)}</td>'
+          f'<td><code>{_esc(p.basis)}</code></td></tr>'
+          for p in shown)
+      + '</tbody></table></div>')
+    more = len(pats) - len(shown)
+    tail = (f' {more} further pattern{"" if more == 1 else "s"} fired below '
+            f'these and {"is" if more == 1 else "are"} held back to keep the '
+            f'list readable.' if more else '')
+    m('<div class="hs-cap" style="margin-top:6px;">Every row is a threshold '
+      'comparison over a series this page computed, with the fields it was read '
+      'from named beside it. Each sentence describes what the data already '
+      f'shows — none of them projects it forward.{tail}</div>')
+
+
+def _render_where_to_go(s, place=None):
+    """Order of movement, destination criteria, and who owns the register.
+
+    The honest shape of this panel took some arriving at. Ranking destinations
+    is what one would want to build, and it is exactly what the data cannot
+    support: the only candidate places are the three zones a basin is evacuated
+    *from*, their elevation figures are labels rather than measurements and are
+    the demo basin's reused for every region, and the highest of the three
+    still carries a finite arrival delay — the app's own banding paints it
+    critical once the levee goes. So this computes the thing that *is* real,
+    which is the order, states the criteria a destination has to meet, and
+    hands the choice of site to the plan that holds the register.
+    """
+    scripted = place is None
+    pl = place or H.DEMO_PLACE
+    guide = H.safe_guidance(s, pl, scripted=scripted)
+
+    m(h2("Where to go",
+         "The order of movement is computed; the destination is your plan's to name"))
+
+    if not guide["active"]:
+        m(note("Nobody is moving on this update — the computed curve puts no "
+               "household inside the mapped low-lying zone. The order below is "
+               "what the zone list would produce if that changed, and is worth "
+               "walking and timing while there is no reason to.",
+               label="Nothing to move"))
+    else:
+        lead = _mins(guide["lead_minutes"])
+        m(note(f"The computed margin is <b>{_esc(lead)}</b> and "
+               f"<b>{guide['households']:,}</b> households are inside the "
+               f"mapped low-lying zone. Move in the order below: it is the "
+               f"basin's time to impact plus each zone's own delay, which is "
+               f"the same arithmetic the Disaster response tab's zone table "
+               f"does, so the two cannot disagree.",
+               label="Order of movement"))
+    st.write("")
+
+    m('<div class="hs-scroll"><table class="hs-table"><thead><tr>'
+      '<th>Order</th><th>Zone</th><th>Households</th><th>Time to impact</th>'
+      '</tr></thead><tbody>'
+      + "".join(
+          f'<tr><td class="num">{st_.order}</td>'
+          f'<td><b>{_esc(st_.name)}</b> '
+          f'<span class="hs-cap">{_esc(st_.zone)}</span></td>'
+          f'<td class="num">{st_.households:,}</td>'
+          f'<td>{badge(_mins(st_.minutes), st_.severity)}</td></tr>'
+          for st_ in guide["steps"])
+      + '</tbody></table></div>')
+
+    st.write("")
+    m('<div class="hs-dir__alabel">What a destination has to satisfy</div>'
+      '<ul class="hs-dir__actions" style="margin:0 0 6px;">'
+      + "".join(f"<li>{_esc(c)}</li>" for c in guide["criteria"])
+      + '</ul>')
+
+    if scripted and guide.get("named"):
+        m(f'<div class="hs-cap">The scripted basin names its own destination: '
+          f'{_esc(guide["named"])}. A real region\'s would come from its '
+          f'district plan, not from here.</div>')
+    m(f'<div class="hs-cap" style="margin-top:6px;">{_esc(guide["handoff"])} '
+      'Criteria rather than a pin on a map is a deliberate choice: this console '
+      'holds the basin\'s hydrology and its zone list, and naming a shelter it '
+      'has never verified would be the one place on the dashboard where a '
+      'number was invented.</div>')
+
+
+def _render_measures(s):
+    """The mitigation measures that apply, by desk, with what triggered each.
+
+    A catalogue lookup, not a generator. Every row is an entry in
+    ``hydro_engine.MITIGATIONS`` whose trigger holds for this state, so the
+    list can be checked against the table and a measure that is not in the
+    table cannot reach the screen. ``because`` names the reading that put it
+    there, and ``authority`` names the family of guidance it is drawn from —
+    a citation, not a certification of this software.
+    """
+    rows = H.mitigations(s)
+    m(h2("What else is worth doing",
+         "Selected by rule from a fixed catalogue — never generated"))
+    if not rows:
+        m(note("No measure's trigger holds on this update.",
+               label="Nothing outstanding"))
+        return
+
+    desks = {"farmer": "Farmer", "dam": "Duty engineer",
+             "disaster": "Disaster officer", "public": "Public"}
+    m('<div class="hs-scroll"><table class="hs-table"><thead><tr>'
+      '<th>Desk</th><th>Measure</th><th>When</th><th>Why it is listed</th>'
+      '<th>Drawn from</th>'
+      '</tr></thead><tbody>'
+      + "".join(
+          f'<tr><td>{_esc(desks.get(mt.role, mt.role))}</td>'
+          f'<td>{_esc(mt.action)}</td>'
+          f'<td>{_esc(mt.horizon)}</td>'
+          f'<td>{_esc(mt.because)}</td>'
+          f'<td>{_esc(mt.authority)}</td></tr>'
+          for mt in rows)
+      + '</tbody></table></div>')
+    m(f'<div class="hs-cap" style="margin-top:6px;">{len(rows)} of '
+      f'{len(H.MITIGATIONS)} catalogued measures have a trigger that holds on '
+      'this update. &ldquo;Drawn from&rdquo; names the body and subject the '
+      'practice comes from, not a clause: a reference this project has not '
+      'checked would be worse than none, and measures standing on ordinary '
+      'control-room or field practice say so.</div>')
 
 
 # ---------------------------------------------------------------------------
@@ -1963,15 +2145,15 @@ def _render_ask(s, d):
     st.text_input("Your question", key="ask_q",
                   placeholder="e.g. how long until the levee overtops, and who is exposed?",
                   label_visibility="collapsed")
-    m('<div class="hs-cap" style="margin:-6px 0 6px;">Typing does not send '
-      'anything — press a button below. The right-hand one answers from the '
-      'computed state alone and makes no network call at all.</div>')
+    m('<div class="hs-cap" style="margin:-6px 0 6px;">Typing does not submit — '
+      'press a button below. The right-hand one answers from the computed state '
+      'alone.</div>')
     c_go, c_raw = st.columns([1, 1])
     with c_go:
         go = st.button("Ask the analyst", key="ask_go", type="primary",
                        width="stretch")
     with c_raw:
-        raw = st.button("Answer from the data only — no model call",
+        raw = st.button("Answer from the computed data only",
                         key="ask_raw", width="stretch")
 
     question = (ss.get("ask_q") or "").strip()
@@ -1989,9 +2171,8 @@ def _render_ask(s, d):
     data = ss.get("_ask")
     if not data:
         m('<div class="hs-cap" style="margin-top:8px;">Nothing has been asked '
-          'yet. Nothing is sent anywhere until you ask — and the answer is '
-          'composed from the computed state whether or not the language layer '
-          'is reachable.</div>')
+          'yet. The answer is composed from the state this page just '
+          'computed.</div>')
         return
 
     ans = data["ans"]
@@ -2004,10 +2185,10 @@ def _render_ask(s, d):
     # ---- the answer --------------------------------------------------------
     if not ans.in_scope:
         m('<div class="hs-layer hs-layer--research">'
-          '<div class="hs-layer__tag">Out of scope · nothing was sent</div>'
+          '<div class="hs-layer__tag">Out of scope</div>'
           '<div class="hs-layer__h">This console does not hold that</div>'
           '<div class="hs-layer__p">The question did not match any field this '
-          'engine computes, so no field was retrieved and no model was called. '
+          'engine computes, so nothing was retrieved. '
           'Answering anyway would be a guess dressed as a reading, which is the '
           'one thing a flood console must not do. Ask about the river, the '
           'reservoir, the levee, who is exposed, the soil and the crop, the '
@@ -2023,36 +2204,34 @@ def _render_ask(s, d):
           f'{_nugen_html(ans.result.text)}</div>'
           f'<div class="hs-cap" style="margin-top:10px;">'
           f'{_nugen_figure_check(ans.result.unsupported)}</div>'
-          f'<div class="hs-cap" style="margin-top:4px;">Worded by '
-          f'<code>{_esc(ans.result.model or nugen_client.MODEL)}</code> from the '
+          f'<div class="hs-cap" style="margin-top:4px;">Written from the '
           f'{len(ans.facts)} fields below and nothing else. The computed answer '
           f'it was written from is directly underneath.</div>'
           '</div>')
         m('<div class="hs-layer hs-layer--research" style="margin-top:10px;">'
-          '<div class="hs-layer__tag">Answer of record · computed, no model</div>'
+          '<div class="hs-layer__tag">Answer of record · computed</div>'
           f'<div class="hs-layer__p">{_esc(ans.grounded)}</div>'
           '<div class="hs-cap" style="margin-top:10px;">Built from the retrieved '
-          'fields by rule before the model ran. If the two disagree, this one is '
-          'right.</div>'
+          'fields by rule. If the two disagree, this one is right.</div>'
           '</div>')
     else:
         why = ""
         if ans.result is not None and ans.result.unsupported:
-            why = ('The model\'s wording is withheld: it quoted '
+            why = ('An alternative wording was withheld: it quoted '
                    + _esc(", ".join(str(b) for b in ans.result.unsupported[:6]))
                    + ', which is not among the fields that were retrieved.')
-        elif ans.result is not None:
-            why = ('The language layer did not answer — '
-                   + _esc(ans.result.error) + ' This answer does not need it.')
         else:
-            why = ('The language layer was not called, by request. The answer '
-                   'below is what the console computes either way.')
+            # No apology and no explanation when assistance is simply absent:
+            # the computed answer is the answer, and why it is the only one on
+            # screen is not the operator's problem.
+            why = ''
         m('<div class="hs-layer">'
           '<div class="hs-layer__tag">Answer · computed from the retrieved data</div>'
           f'<div class="hs-layer__p" style="font-size:14.5px;color:var(--ink);">'
           f'{_esc(ans.grounded)}</div>'
-          f'<div class="hs-cap" style="margin-top:10px;">{why}</div>'
-          '</div>')
+          + (f'<div class="hs-cap" style="margin-top:10px;">{why}</div>'
+             if why else '')
+          + '</div>')
 
     if stale:
         m('<div class="hs-cap" style="margin-top:6px;color:var(--warning);">'
@@ -2076,28 +2255,10 @@ def _render_ask(s, d):
       + '</tbody></table></div>')
     m('<div class="hs-cap" style="margin-top:6px;">Each row is an attribute of '
       'the state object this page rendered, selected because the question '
-      'matched the topic it belongs to. This table <b>is</b> what the model was '
-      'given — the prompt below is these rows and the question, and nothing '
-      'else.</div>')
+      'matched the topic it belongs to. These rows are the whole of what the '
+      'answer above was allowed to use.</div>')
 
     _render_harness(ans)
-
-    if ans.digest:
-        sent = ans.result is not None
-        # The STORED digest, not a fresh one. Recomputing against the current
-        # state showed a stale answer beside a prompt that was never sent.
-        with st.expander(f'What {"was" if sent else "would be"} sent for '
-                         f'this question'):
-            st.code("\n\n".join(
-                f"[{msg['role']}]\n{msg['content']}"
-                for msg in nugen_client.build_analyst_messages(ans.digest)),
-                language="text")
-            st.caption(
-                "The fixed instruction, one worked example, then the question "
-                "and the retrieved fields. No credentials, no raw observations "
-                "and no part of the dashboard beyond those fields leaves the "
-                f"app. Capped at {nugen_client.ANALYST_MAX_TOKENS} completion "
-                "tokens.")
 
 
 def _render_harness(ans):
@@ -2109,8 +2270,15 @@ def _render_harness(ans):
     computed answer had to stand in. A reviewer can make it say "failed" on
     purpose by asking something the console does not hold.
     """
+    # The rows naming the assistance transport and what it spent are dropped
+    # here rather than at source: they are the implementation of the answer, not
+    # the checks on it, and an operator has no use for either. The checks stay,
+    # because they are the part that is worth trusting.
+    rows = [(n, o, t) for n, o, t in (ans.stages or [])
+            if n not in _HARNESS_HIDE]
     st.write("")
-    m(h2("AI harness", "What each stage of the pipeline did with this question"))
+    m(h2("How this answer was checked",
+         "What each stage did with the question before it reached you"))
     m('<div class="hs-scroll"><table class="hs-table"><thead><tr>'
       '<th>Stage</th><th>Outcome</th><th>What happened</th>'
       '</tr></thead><tbody>'
@@ -2118,39 +2286,36 @@ def _render_harness(ans):
           f'<tr><td><b>{_esc(name)}</b></td>'
           f'<td>{badge(_esc(outcome), _harness_sev(outcome))}</td>'
           f'<td>{_esc(detail)}</td></tr>'
-          for name, outcome, detail in (ans.stages or []))
+          for name, outcome, detail in rows)
       + '</tbody></table></div>')
     m('<div class="hs-cap" style="margin-top:6px;">The guardrails are the '
       'product, not a disclaimer. Retrieval is ordinary attribute lookup, so '
       'the figures cannot drift from the engine; the figure check is a '
-      'deterministic comparison against the retrieved facts; and the computed '
-      'answer is produced <i>before</i> the model is called, so there is always '
-      'something correct to fall back to. Ask about something outside the basin '
-      'to watch the scope check decline instead of guessing.</div>')
+      'deterministic comparison against what was retrieved; and the computed '
+      'answer is produced <i>first</i>, so there is always something correct to '
+      'fall back to. Ask about something outside the basin to watch the scope '
+      'check decline instead of guessing.</div>')
 
 
 # ---------------------------------------------------------------------------
 # Engine validation (kept from the old Model & validation tab, one level down)
 # ---------------------------------------------------------------------------
 def _render_engine_evidence(s, d):
-    m(note("Two separated layers. <b>Layer 1</b> is the deterministic physics "
-           "engine that produced every number on this console. <b>Layer 2</b> "
-           "never produces a number: the neural surrogates and published "
-           "benchmarks are research that does <b>not</b> run here at all, and the "
-           "Nugen language layer does run on every update but only re-words what "
-           "Layer 1 decided. Everything in the "
-           "<i>Measured</i> and <i>Audit</i> blocks below is computed on this "
-           "update, in front of you; everything in <i>Reference</i> is a constant "
-           "and is labelled as one.",
+    m(note("Every number on this console came out of the deterministic physics "
+           "engine. Everything in the <i>Measured</i> and <i>Audit</i> blocks "
+           "below is computed on this update, in front of you; everything in "
+           "<i>Reference</i> is a constant and is labelled as one. The neural "
+           "surrogates and the published 2D benchmark are research that does "
+           "<b>not</b> run here at all, and are kept separate for that reason.",
            label="Read this first"))
     st.write("")
 
     # ---- the two layers, stated once each -------------------------------
     c_l1, c_l2 = st.columns([1, 1])
     with c_l1:
-        m(h2("Layer 1 — Operational Production Engine", "Ran this update"))
+        m(h2("Operational Production Engine", "Ran this update"))
         m('<div class="hs-layer">'
-          '<div class="hs-layer__tag">Layer 1 · in the live decision path · running now</div>'
+          '<div class="hs-layer__tag">In the live decision path · running now</div>'
           '<div class="hs-layer__h">Closed-form hydrology — '
           f'{s.real_compute_ms:.2f} ms measured this update</div>'
           '<div class="hs-layer__p">Solved on the CPU: no model weights, no GPU, no '
@@ -2165,10 +2330,10 @@ def _render_engine_evidence(s, d):
           'this chain.</div>'
           '</div>')
     with c_l2:
-        m(h2("Layer 2 — Research &amp; Neural Surrogates",
-             "Two tracks: one offline, one live but non-computational"))
+        m(h2("Research &amp; Neural Surrogates",
+             "Offline — none of this runs to render the console"))
         m('<div class="hs-layer hs-layer--research">'
-          '<div class="hs-layer__tag">Layer 2 · research track · did not run</div>'
+          '<div class="hs-layer__tag">Research track · did not run</div>'
           '<div class="hs-layer__h">Neural surrogates and the HEC-RAS 2D benchmark</div>'
           '<div class="hs-layer__p">Targets what the closed-form engine does not '
           'attempt: full 2D inundation mapping and learned error correction. Its '
@@ -2182,29 +2347,6 @@ def _render_engine_evidence(s, d):
           '<div class="hs-cap" style="margin-top:10px;">RESEARCH / BENCHMARK PATH — '
           'offline, against historical events; none of it runs to render this console.</div>'
           '</div>')
-        # The other half of Layer 2 does run, on every update, and saying so
-        # here is the point: a reviewer should not have to discover from the
-        # role tabs that a language model is in the product. The boundary that
-        # makes it safe is the one stated in the card — it is handed the
-        # computed numbers and writes prose, and it is never asked for one.
-        m('<div class="hs-layer hs-layer--research" style="margin-top:12px;">'
-          '<div class="hs-layer__tag">Layer 2 · language track · runs every update</div>'
-          f'<div class="hs-layer__h">Nugen '
-          f'<code>{_esc(nugen_client.known_models()[0])}</code> — '
-          'the briefing under each directive</div>'
-          '<div class="hs-layer__p">The one Layer 2 component that is live in the '
-          'product. Each role tab carries a Nugen briefing beneath its directive '
-          'card, re-worded for the reader that tab is for. It is handed the '
-          'numbers Layer 1 computed and instructed to use nothing else; every '
-          'figure it prints is checked back against the computed state, and '
-          'anything unsupported is flagged on the card itself. It solves no '
-          'equation, produces no forecast and changes no value above — a small '
-          'model is a good writer and a bad hydrologist, so it is given the '
-          'writing and kept away from the hydrology.</div>'
-          '<div class="hs-cap" style="margin-top:10px;">LANGUAGE PATH — '
-          'presentational only; the console renders identically with this layer '
-          'switched off. Prompts, spend and figure checks are below.</div>'
-          '</div>')
 
     # ---- MEASURED on this update ----------------------------------------
     st.write("")
@@ -2216,18 +2358,37 @@ def _render_engine_evidence(s, d):
     cards = []
 
     # 1 — mass balance. The strongest claim available, and it is a proof.
-    if mb["v_spill"] < -1e-6 or mb["v_spill"] > 1e-6:
-        mb_note = (f'Includes {abs(mb["v_spill"]):,.0f} acre-ft shed by the '
-                   'capacity clamp (spill), which is water leaving the system.')
+    #
+    # At tick 0 the event has not started: flood_hours is 0, so the recurrence
+    # integrates over nothing and every term comes out zero. Printing
+    # "Sigma inflow 0 - Sigma release 0 - Delta storage 0 over 0.0 h" is
+    # technically true and reads as a broken panel, which is the worst of both.
+    # Say what is actually the case instead, and let the proof appear once there
+    # is something to prove.
+    if s.flood_hours < 0.05:
+        cards.append((
+            "Mass balance",
+            "not yet",
+            "the event has not started",
+            'The reservoir recurrence is integrated over the event window, and '
+            'at this tick that window is still zero hours long, so there is no '
+            'volume to balance. Step the clock forward and this becomes a '
+            'closed-books proof: &Sigma;inflow &minus; &Sigma;release &minus; '
+            '&Delta;storage, against the storage the engine reported.'))
     else:
-        mb_note = 'No spill this update, so every acre-foot is either released or stored.'
-    cards.append((
-        "Mass balance closes",
-        f'{mb["resid"]:+.2e}',
-        "acre-ft unaccounted for",
-        f'&Sigma;inflow {mb["v_in"]:,.0f} &minus; &Sigma;release {mb["v_out"]:,.0f} '
-        f'&minus; &Delta;storage {mb["d_s"]:,.0f} over {s.flood_hours:.1f} h. '
-        f'Relative error {mb["rel"]:.1e} — machine precision. {mb_note}'))
+        if mb["v_spill"] < -1e-6 or mb["v_spill"] > 1e-6:
+            mb_note = (f'Includes {abs(mb["v_spill"]):,.0f} acre-ft shed by the '
+                       'capacity clamp (spill), which is water leaving the system.')
+        else:
+            mb_note = ('No spill this update, so every acre-foot is either '
+                       'released or stored.')
+        cards.append((
+            "Mass balance closes",
+            f'{mb["resid"]:+.2e}',
+            "acre-ft unaccounted for",
+            f'&Sigma;inflow {mb["v_in"]:,.0f} &minus; &Sigma;release {mb["v_out"]:,.0f} '
+            f'&minus; &Delta;storage {mb["d_s"]:,.0f} over {s.flood_hours:.1f} h. '
+            f'Relative error {mb["rel"]:.1e} — machine precision. {mb_note}'))
 
     # 2 — runtime as a distribution, not one lucky sample.
     if spec is not None:
@@ -2355,18 +2516,18 @@ def _render_engine_evidence(s, d):
     st.write("")
     m(h2("Reference figures", "Carried as constants — not computed or validated here"))
     m('<div class="hs-scroll"><table class="hs-table"><thead><tr>'
-      '<th>Figure</th><th>Value</th><th>Layer</th><th>What it is</th>'
+      '<th>Figure</th><th>Value</th><th>Source</th><th>What it is</th>'
       '</tr></thead><tbody>'
-      f'<tr><td>KGE accuracy</td><td class="num">{s.kge:.2f}</td><td>1</td>'
+      f'<tr><td>KGE accuracy</td><td class="num">{s.kge:.2f}</td><td>Engine</td>'
       '<td>Reference validation score for this modelling approach (1.0 is perfect)</td></tr>'
-      f'<tr><td>Drought lead time</td><td class="num">{s.lead_time_days} days</td><td>1</td>'
+      f'<tr><td>Drought lead time</td><td class="num">{s.lead_time_days} days</td><td>Engine</td>'
       '<td>Published warning margin before visible crop wilting</td></tr>'
-      f'<tr><td>Drought detection (POD)</td><td class="num">{s.pod:.2f}</td><td>1</td>'
+      f'<tr><td>Drought detection (POD)</td><td class="num">{s.pod:.2f}</td><td>Engine</td>'
       '<td>Reference probability of catching onset</td></tr>'
-      f'<tr><td>Soil-moisture match (R)</td><td class="num">{s.r_smap:.2f}</td><td>1</td>'
+      f'<tr><td>Soil-moisture match (R)</td><td class="num">{s.r_smap:.2f}</td><td>Engine</td>'
       '<td>Reference agreement with NASA SMAP satellite retrievals</td></tr>'
       f'<tr><td>PINN flood-map surrogate</td><td class="num">~{H.BENCHMARK_COMPUTE_S:.1f} s</td>'
-      '<td>2</td><td>Benchmark per 2D depth map, against ~2.3 h for HEC-RAS 2D</td></tr>'
+      '<td>Benchmark</td><td>Per 2D depth map, against ~2.3 h for HEC-RAS 2D</td></tr>'
       '</tbody></table></div>')
     m('<div class="hs-cap" style="margin-top:6px;">These four validation figures are '
       'constants in <code>hydro_engine.py</code>; nothing on this page recomputes '
@@ -2402,7 +2563,7 @@ def _render_comparison(s):
       '<td>A directive per desk — farmer, duty engineer, disaster officer — '
       'with the threshold that fired.</td>'
       '<td>Depth and velocity grids for a hydrologist to interpret.</td></tr>'
-      '<tr><td><b>Language layer</b></td>'
+      '<tr><td><b>AI assistance</b></td>'
       '<td>A briefing per desk and an analyst that answers questions, every '
       'figure checked back against the computed state.</td>'
       '<td>None.</td></tr>'
@@ -2420,7 +2581,7 @@ def _render_comparison(s):
 
 
 # ---------------------------------------------------------------------------
-# THE NUGEN LANGUAGE LAYER (Layer 2, language only)
+# THE ASSISTANCE LAYER (wording only — it computes nothing)
 #
 # ``render_role_briefing`` is the layer itself and renders on all three role
 # tabs, inline under the directive it re-words. ``render_nugen_panel`` is its
@@ -2499,254 +2660,139 @@ def _nugen_figure_check(unsupported) -> str:
             'appears in the computed state.</span>')
 
 
-def render_role_briefing(s, d, role: str):
-    """The Nugen language layer, inline under the directive it re-words.
+def render_role_support(s, d, role: str, place=None):
+    """Action support under each directive: where to go, what else, what showed.
 
-    This is the product's third output for every role, alongside the directive
-    card and the chart: the same decision, in the register that role actually
-    reads. It sits directly beneath the authoritative card and is styled with the
-    ``--research`` modifier the rest of the app uses for "secondary, not the
-    authority", so the ordering on screen matches the ordering of trust.
+    The directive card above already states the decision and the hazard. This
+    card answers the three questions it leaves open — *to where*, *what else*,
+    and *what in the data put us here* — and it is deliberately built so that it
+    cannot answer the first one. Three consequences follow from that:
 
-    How it is fetched differs by mode, and the difference is the quota:
+    * It carries no hazard claim, because a hazard claim needs either a forecast
+      verb or a figure the directive has already stated, and this card quotes
+      neither the inflow peak nor the time to impact.
+    * It cannot duplicate the directive, whose situation line is made of exactly
+      those figures.
+    * It renders identically whether or not the assistance layer is reachable,
+      because every line of it is computed. There is nothing to apologise for
+      and nothing to explain, which is the point: an operator should never be
+      told what is wired up behind a console, only what to do.
 
-    * **Live** — fetched automatically in a background thread as the basin
-      changes. Never inline, because the transport has a 30-second read timeout
-      and a synchronous call would freeze the console on exactly the updates that
-      matter. The result is keyed on the (bucketed, clock-free) facts, so a steady
-      basin costs nothing however often the page refreshes.
-    * **Demo** — on an explicit click only. The scripted demo re-runs every two
-      seconds across 33 ticks; fetching automatically there would spend the whole
-      session budget in under a minute and say nothing new.
+    ``place`` is the live-mode Place, or None for the scripted demo basin. The
+    distinction matters here more than anywhere else in the app: the demo's
+    geography is part of the script and may be named, and a geocoded region's
+    cannot be. See ``hydro_engine.safe_guidance``.
     """
-    cfg = nugen_client.ROLES[role]
-    key = _nugen_key()
+    scripted = place is None
+    pl = place or H.DEMO_PLACE
+    guide = H.safe_guidance(s, pl, scripted=scripted)
+    measures = H.mitigations(s, role, limit=3)
+    pats = [p for p in H.detect_patterns(s) if p.audience in (role, "all")]
 
-    if not key:
-        # One quiet line, not a warning box on all three tabs. The full
-        # explanation — what this layer adds, and how to switch it on — lives in
-        # the AI analyst tab, which is where a reviewer goes for it.
-        m('<div class="hs-cap" style="margin-top:2px;">'
-          f'Nugen briefing for {_esc(cfg["label"].lower())}: layer is off, no '
-          '<code>NUGEN_API_KEY</code> configured. The directive above is produced '
-          'without it — see the <b>AI analyst</b> tab for what this layer adds.'
-          '</div>')
-        return
+    heading = {
+        "farmer": "Safe ground, and what else protects the crop",
+        "dam": "Downstream clearance, and what else protects the release",
+        "disaster": "Where each zone goes, and who needs help to get there",
+    }.get(role, "Where to go, and what else helps")
 
-    label = _nugen_basin_label()
-    auto = ss.mode == "live" and bool(ss.get("_live_ever_ok"))
-    res = nugen_client.request_role_async(s, d, role, label, api_key=key,
-                                         auto=auto)
-
-    if res is None and not auto:
-        # Demo mode: nothing is cached for this update and nothing is fetched
-        # automatically. Offer the call only while the demo is paused — under a
-        # clock that advances every two seconds the briefing would be stale
-        # before it rendered.
-        if ss.get("live"):
-            m('<div class="hs-cap" style="margin-top:2px;">Nugen briefing: pause '
-              'the demo to generate one for a specific update, or switch to '
-              '<b>Live data</b>, where briefings are fetched automatically as the '
-              'basin changes.</div>')
-            return
-        if st.button(f"Generate the Nugen briefing — {cfg['label'].lower()}",
-                     key=f"nugen_go_{role}", width="stretch"):
-            with st.spinner("Nugen is re-wording the directive…"):
-                res = nugen_client.brief_role(s, d, role, label, api_key=key)
-        else:
-            m('<div class="hs-cap" style="margin-top:2px;">Re-words the directive '
-              f'above for this reader using Nugen '
-              f'<code>{_esc(nugen_client.known_models()[0])}</code>. '
-              'Nothing on this page depends on it.</div>')
-            return
-
-    if res is None:
-        m('<div class="hs-cap" style="margin-top:2px;">Nugen is re-wording this '
-          'directive — the briefing appears here within a few seconds, without '
-          'holding up anything above.</div>')
-        return
-
-    if not res.ok:
-        m('<div class="hs-cap" style="margin-top:2px;">'
-          f'Nugen briefing unavailable: {_esc(res.error)} '
-          'The directive above is unaffected.</div>')
-        if st.button("Try the briefing again", key=f"nugen_retry_{role}"):
-            nugen_client.request_role_async(s, d, role, label, api_key=key,
-                                            auto=True, retry=True)
-            _safe_rerun()
-        return
-
-    cost = ("served from cache, no tokens spent" if res.cached
-            else (f"{res.tokens_out} completion tokens"
-                  if res.tokens_out else f"{res.max_tokens}-token cap"))
-    # The tag is kept short deliberately: it renders as uppercase mono with
-    # letter-spacing inside a ~55%-width column, and the model id is long enough
-    # to wrap it onto two lines. The id is evidence, not a heading, so it sits in
-    # the footer with the other evidence — what it cost, and the figure check.
-    m('<div class="hs-layer hs-layer--research" style="margin-top:12px;">'
-      '<div class="hs-layer__tag">Nugen · language layer</div>'
-      f'<div class="hs-layer__h">{_esc(cfg["label"])}</div>'
-      f'<div class="hs-layer__p">{_nugen_html(res.text)}</div>'
-      f'<div class="hs-cap" style="margin-top:10px;">'
-      f'{_nugen_figure_check(res.unsupported)}</div>'
-      '<div class="hs-cap" style="margin-top:4px;">Re-wording of the directive '
-      f'above by <code>{_esc(res.model or nugen_client.known_models()[0])}</code>'
-      f' · {cost} · this layer computes '
-      'nothing and changes no number.</div>'
-      '</div>')
-
-
-def render_nugen_panel(s, d):
-    """The Nugen language layer's audit surface: what is sent, and what it cost.
-
-    The layer itself is not here — it renders inline on the three role tabs,
-    under the directive each briefing re-words. This panel is where a reviewer
-    checks it: the exact prompt for every role, the budget actually spent, and
-    the standing claim that no number on the dashboard comes from this layer.
-    """
-    m(h2("Nugen language layer — what is sent, and what it costs",
-         "Layer 2 · language only · the briefings on the three role tabs"))
-    m(note("Every role tab carries a Nugen briefing under its directive card: "
-           "the same decision, re-worded for the farmer, the duty engineer and the "
-           "disaster officer. The model is handed the computed numbers and "
-           "instructed to use nothing else; every figure it prints is then checked "
-           "back against the computed state and anything unsupported is flagged on "
-           "the card. It cannot reach the physics engine, the directive cards stay "
-           "the authoritative wording, and the console renders identically when "
-           "this layer is off — which is what makes it safe to put a language model "
-           "in front of a flood warning at all.",
-           label="What this is, and is not"))
-    st.write("")
-
-    key = _nugen_key()
-    basin_label = _nugen_basin_label()
-    sig = _nugen_sig(s)
-
-    if not key:
-        m('<div class="hs-layer hs-layer--research">'
-          '<div class="hs-layer__tag">Layer 2 · not configured</div>'
-          '<div class="hs-layer__h">Briefing layer is off — no API key configured</div>'
-          '<div class="hs-layer__p">This is the normal state for a public deployment: the '
-          'key is never committed to the repository. To switch the layer on, set '
-          '<code>NUGEN_API_KEY</code> as an environment variable (on Render: '
-          '<i>Environment → Environment Variables</i>) or put it in a gitignored '
-          '<code>.streamlit/secrets.toml</code>, then restart the app. Every forecast, '
-          'gauge and directive on this dashboard is produced without it.</div>'
-          f'<div class="hs-cap" style="margin-top:10px;">Model '
-          f'<code>{nugen_client.MODEL}</code> · '
-          f'{nugen_client.MAX_TOKENS_LIMIT}-token completion cap.</div>'
-          '</div>')
-        _render_nugen_prompts(s, d, basin_label)
-        return
-
-    left, right = st.columns([2, 1])
-    with left:
-        go = st.button("Generate the combined briefing — all three roles",
-                       key="nugen_go", width="stretch")
-    with right:
-        st.markdown(
-            f'<div class="hs-cap" style="padding-top:8px;">Model '
-            f'<code>{_esc(nugen_client.known_models()[0])}</code> · cap '
-            f'{nugen_client.DEFAULT_MAX_TOKENS}/{nugen_client.MAX_TOKENS_LIMIT} tokens · '
-            f'{nugen_client.budget_left()} calls left this session.<br>'
-            f'Resolved from the account catalogue: '
-            f'{_esc(nugen_client.catalogue_note())}.</div>',
-            unsafe_allow_html=True)
-
-    # The layer's actual spend, not a promise about it. Role briefings come out
-    # of the automatic allowance; this panel's combined briefing comes out of the
-    # headroom left above it, so a reviewer can always get one on demand.
-    m(f'<div class="hs-cap" style="margin-top:8px;">Spent so far this session: '
-      f'<b>{nugen_client.calls_made()}</b> network call'
-      f'{"" if nugen_client.calls_made() == 1 else "s"} of '
-      f'{nugen_client.CALL_BUDGET}, of which <b>{nugen_client.auto_calls_made()}</b> '
-      f'were the automatic role briefings (allowance '
-      f'{nugen_client.AUTO_CALL_BUDGET}, {nugen_client.auto_budget_left()} left). '
-      f'A briefing is keyed on the facts it was written from, so an unchanged '
-      f'basin re-renders its briefings for free however often the page refreshes.'
-      f'</div>')
-
-    if go:
-        with st.spinner("Re-wording the directives…"):
-            res = nugen_client.brief(s, d, place_name=basin_label, api_key=key)
-        ss["_nugen"] = {
-            "sig": sig, "ok": res.ok, "text": res.text, "error": res.error,
-            "cached": res.cached, "tokens": res.tokens_out,
-            "unsupported": list(res.unsupported),
-            "clock": getattr(s, "clock", ""),
-        }
-
-    data = ss.get("_nugen")
-    if not data:
-        m('<div class="hs-cap" style="margin-top:8px;">No combined briefing '
-          'requested yet — the per-role briefings on the three role tabs are the '
-          'layer\'s normal output, and this button is the manual path to all three '
-          'in one paragraph. Nothing is sent for it until you press it.</div>')
-        _render_nugen_prompts(s, d, basin_label)
-        return
-
-    if not data.get("ok"):
-        m(note(_esc(data.get("error") or "The briefing layer did not return text."),
-               label="Briefing unavailable"))
-        m('<div class="hs-cap" style="margin-top:6px;">The dashboard above is '
-          'unaffected — the briefing layer is presentational.</div>')
-        _render_nugen_prompts(s, d, basin_label)
-        return
-
-    stale = data.get("sig") != sig
-    tag = ("Layer 2 · language layer · re-worded from the directives above"
-           if not stale else
-           "Layer 2 · generated for an earlier update — press again to refresh")
-    bad = data.get("unsupported") or []
-    if bad:
-        check = ('<span style="color:var(--warning)">Figure check: '
-                 + _esc(", ".join(str(b) for b in bad[:6]))
-                 + ' did not come from the computed state — trust the directive '
-                   'cards, not this wording.</span>')
+    # ---- where to go ----------------------------------------------------
+    high = _highest_zone(pl)
+    if guide["active"] and role == "disaster":
+        order = "".join(
+            f'<li>{_esc(st_.name)} <span class="hs-cap">({_esc(st_.zone)}'
+            + (f", {st_.households:,} households" if st_.households else "")
+            + f')</span></li>'
+            for st_ in guide["steps"])
+        where = (f'Move in this order, soonest impact first:'
+                 f'<ol class="hs-dir__actions" style="margin:6px 0 8px;">{order}</ol>'
+                 + _dest_criteria_html(guide, scripted))
+    elif guide["active"]:
+        subject = ("livestock, pumpsets and stored grain" if role == "farmer"
+                   else "anyone working the channel or the bank")
+        where = (f'{_esc(high)} is the highest point on the zone list and the '
+                 f'standing destination for {subject}. '
+                 + _dest_criteria_html(guide, scripted))
     else:
-        check = ('<span style="color:var(--safe)">Figure check: every number in '
-                 'this briefing appears in the computed state.</span>')
-    m('<div class="hs-layer hs-layer--research">'
-      f'<div class="hs-layer__tag">{tag}</div>'
-      f'<div class="hs-layer__h">Duty-officer briefing — {_esc(basin_label)}</div>'
-      f'<div class="hs-layer__p">{_nugen_html(data.get("text", ""))}</div>'
-      f'<div class="hs-cap" style="margin-top:10px;">{check}</div>'
-      f'<div class="hs-cap" style="margin-top:4px;">Generated for the '
-      f'{_esc(data.get("clock") or "current")} update'
-      + (" · served from cache (no tokens spent)" if data.get("cached")
-         else (f" · {data['tokens']} completion tokens"
-               if data.get("tokens") else ""))
-      + ' · wording only: nothing here is computed by this layer.</div>'
-      '</div>')
+        subject = ("livestock, pumpsets and stored grain" if role == "farmer"
+                   else "anyone working the channel or the bank")
+        where = (f'Nobody is moving. {_esc(high)} is the highest point on the '
+                 f'zone list and the standing destination for {subject} if that '
+                 f'changes.')
 
-    with st.expander("What was sent to the briefing layer"):
-        st.code(nugen_client.preview(s, d, basin_label), language="text")
-        st.caption("Only the computed state and the approved directives are sent, "
-                   "after a fixed instruction and one worked example. No credentials, "
-                   "no user input and no raw observations leave the app.")
-    _render_nugen_prompts(s, d, basin_label)
+    html = ['<div class="hs-layer hs-layer--research" style="margin-top:12px;">'
+            '<div class="hs-layer__tag">Support actions</div>'
+            f'<div class="hs-layer__h">{heading}</div>'
+            '<div style="margin-top:8px;">'
+            + note(where, label="Where to go") +
+            '</div>']
+
+    # ---- what else helps ------------------------------------------------
+    if measures:
+        items = "".join(
+            f'<li>{_esc(mt.action)}'
+            f' <span class="hs-cap">[{_esc(mt.horizon)}]</span></li>'
+            for mt in measures)
+        html.append('<div class="hs-dir__alabel" style="margin-top:14px;">'
+                    'What else helps</div>'
+                    f'<ul class="hs-dir__actions" style="margin:0 0 2px;">'
+                    f'{items}</ul>')
+
+    # ---- noticed in the data -------------------------------------------
+    # The alert. Deliberately the pattern's own computed evidence, which is
+    # phrased in the past or present tense about data that already exists — not
+    # a projection of it. "Noticed in the data" rather than "Alert" because a
+    # second alarm word eight pixels under the directive's severity badge would
+    # read as a competing verdict.
+    if pats:
+        p = pats[0]
+        html.append('<div class="hs-dir__alabel" style="margin-top:12px;">'
+                    'Noticed in the data</div>'
+                    f'<div class="hs-layer__p" style="margin:0;">'
+                    f'<b>{_esc(p.label)}.</b> {_esc(p.detail)}</div>')
+
+    html.append('<div class="hs-cap" style="margin-top:10px;">Zone names come '
+                f'from the district zone list for {_esc(_nugen_basin_label())}. '
+                'Nothing here changes the action above.</div></div>')
+    m("".join(html))
 
 
-def _render_nugen_prompts(s, d, basin_label: str):
-    """The exact prompt behind each role briefing, verbatim and in full.
+def _highest_zone(place) -> str:
+    """The zone the engine's own list places highest, by elevation label.
 
-    The claim this layer makes is that it is handed the computed numbers and may
-    use nothing else. That claim is only worth anything if the prompt is visible,
-    so it is printed here in full, for every role, whether or not a key is
-    configured — a reviewer can audit the layer on a deployment that has never
-    called it.
+    The label is a string ("544 m"), so it is parsed defensively and the list
+    order is the fallback. This is the only place in the app that reads those
+    labels as a quantity, and it is worth being explicit that they are labels:
+    a geocoded region inherits the demo basin's figures, which is exactly why
+    ``safe_guidance`` refuses to name a shelter in live mode.
     """
-    with st.expander("The exact prompt behind each role briefing"):
-        st.caption(
-            f"One request per role, {nugen_client.ROLE_MAX_TOKENS} tokens each. "
-            "The role digests carry no wall clock and round every reading, which "
-            "is what lets a briefing be cached per situation instead of re-billed "
-            "per refresh. Nothing but these lines reaches the endpoint: no "
-            "credentials, no user input, no raw observations.")
-        for role, cfg in nugen_client.ROLES.items():
-            st.markdown(f"**{cfg['label']}** — `role={role}`")
-            st.code(nugen_client.role_preview(s, d, role, basin_label),
-                    language="text")
+    best, best_m = None, None
+    for z in getattr(place, "sectors", []) or []:
+        mt = re.search(r"[0-9]+(?:\.[0-9]+)?", str(z.get("elev", "")))
+        val = float(mt.group(0)) if mt else None
+        if best is None or (val is not None and (best_m is None or val > best_m)):
+            best, best_m = z, val
+    if best is None:
+        return "The highest ground on the zone list"
+    name = str(best.get("name") or best.get("zone") or "the highest zone")
+    return name
+
+
+def _dest_criteria_html(guide, scripted: bool) -> str:
+    """The destination criteria, and who owns the shelter register.
+
+    Criteria rather than a coordinate. The reasoning is in
+    ``hydro_engine.safe_guidance``: naming a site would mean inventing one
+    everywhere except the scripted demo, so the console states what a
+    destination has to satisfy and defers to the plan that holds the register.
+    """
+    out = []
+    if scripted and guide.get("named"):
+        out.append(f'The scripted destination is {_esc(guide["named"])}. ')
+    out.append('A destination has to be: ')
+    out.append("; ".join(_esc(c.rstrip(".")).lower()
+                         for c in guide["criteria"][:3]) + ". ")
+    out.append(f'<span class="hs-cap">{_esc(guide["handoff"])}</span>')
+    return "".join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -2892,7 +2938,7 @@ def render_dashboard():
     with tab_dis:
         render_disaster(s, d, place)
     with tab_ai:
-        render_analyst(s, d)
+        render_analyst(s, d, place)
 
 
 # run_every drives auto-refresh. In demo mode it advances the scenario clock and
