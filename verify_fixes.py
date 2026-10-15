@@ -218,9 +218,18 @@ def test_g() -> None:
           and "real_compute_ms" in app)
     check("G2 the 82.9 s figure is only ever labelled a benchmark",
           "82.9" not in app or "BENCHMARK_COMPUTE_S" in app)
-    for tag in ("Layer 1", "Layer 2", "LIVE OPERATIONAL PATH",
-                "RESEARCH / BENCHMARK PATH"):
-        check(f"G3 tab 5 states {tag!r}", tag in app)
+    # G3 used to assert tab 5 carried the "Layer 1 / Layer 2" vocabulary. That
+    # jargon is deliberately gone: it described the implementation to someone
+    # who only needed the result. The check is inverted, and deliberately looks
+    # at the SOURCE MINUS ITS COMMENTS — the old version passed on "Layer 2"
+    # purely by matching a section banner in a comment, which is a check that
+    # cannot tell UI copy from a note to a maintainer.
+    app_code = re.sub(r"(?m)^\s*#.*$", "", app)
+    for tag in ("Layer 1", "Layer 2"):
+        check(f"G3 tab 5 no longer states {tag!r} to the operator",
+              tag not in app_code)
+    for tag in ("LIVE OPERATIONAL PATH", "RESEARCH / BENCHMARK PATH"):
+        check(f"G3 the path labels survive: {tag!r}", tag in app)
     check("G4 tab 5 says the benchmark is not the operational runtime",
           "not the runtime of the operational engine" in app_plain)
     for tag in ("Operational Production Engine", "Research & Neural Surrogates"):

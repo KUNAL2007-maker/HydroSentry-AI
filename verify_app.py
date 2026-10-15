@@ -312,8 +312,127 @@ def gauge_values(at) -> set[str]:
 
 
 # ---------------------------------------------------------------------------
-# TEST E — live is the default, demo stays selectable
+# TEST P — the instrument, measured before it is trusted
 # ---------------------------------------------------------------------------
+#
+# Every negative check in this file reduces to "needle not in page_text(at)",
+# which is satisfied both by an app that does not leak and by a harvest that
+# cannot see the leak. The second is the failure that actually happened here,
+# so the harvest is tested against an app written for the purpose: one marker
+# per element kind, including the kinds that have no typed accessor.
+_PROBE_APP = '''
+import streamlit as st
+st.title("P_title")
+st.header("P_header")
+st.subheader("P_subheader")
+st.markdown("P_markdown")
+st.caption("P_caption")
+st.text("P_text")
+st.code("P_code_verbatim_prompt", language="text")
+st.metric("P_metric_label", "P_metric_value", "P_metric_delta")
+st.json({"P_json_key": "P_json_value"})
+st.table([{"col": "P_table_cell"}])
+st.dataframe([{"col": "P_dataframe_cell"}])
+st.latex("P\\\\_latex")
+st.write("P_write")
+st.html("<b>P_html</b>")
+st.info("P_info"); st.warning("P_warning")
+st.error("P_error"); st.success("P_success")
+with st.expander("P_expander_label"):
+    st.markdown("P_in_expander_markdown")
+    st.code("P_in_expander_code")
+    st.caption("P_in_expander_caption")
+c1, c2 = st.columns(2)
+with c1:
+    st.code("P_in_column_code")
+with c2:
+    st.metric("P_in_column_metric_label", "P_in_column_metric_value")
+t1, t2 = st.tabs(["P_tab_one_label", "P_tab_two_label"])
+with t1:
+    st.code("P_in_tab_code")
+with t2:
+    st.caption("P_in_tab_caption")
+with st.container():
+    st.markdown("P_in_container")
+st.button("P_button_label", key="p_btn")
+st.slider("P_slider_label", 0, 10, 5, key="p_slider")
+with st.sidebar:
+    st.markdown("P_sidebar_markdown")
+    st.code("P_sidebar_code")
+'''
+
+# What the harvest must reach, grouped so a failure names the kind that broke.
+_PROBE_MUST_SEE = {
+    "the kinds the old harvest already had":
+        ("P_markdown", "P_caption", "P_text", "P_write",
+         "P_info", "P_warning", "P_error", "P_success"),
+    "st.code — the kind whose absence hid 3622 chars of prompt":
+        ("P_code_verbatim_prompt", "P_in_expander_code", "P_in_column_code",
+         "P_in_tab_code", "P_sidebar_code"),
+    "headings":
+        ("P_title", "P_header", "P_subheader"),
+    "st.metric, all three of its properties":
+        ("P_metric_label", "P_metric_value", "P_metric_delta",
+         "P_in_column_metric_label", "P_in_column_metric_value"),
+    "tabular and structured output":
+        ("P_json_key", "P_json_value", "P_table_cell", "P_dataframe_cell"),
+    "contents of an expander, a column, a tab and a container":
+        ("P_in_expander_markdown", "P_in_expander_caption",
+         "P_in_tab_caption", "P_in_container"),
+    "block labels, which are properties and not elements":
+        ("P_expander_label", "P_tab_one_label", "P_tab_two_label"),
+    "widget labels":
+        ("P_button_label", "P_slider_label"),
+    "the sidebar as well as the main body":
+        ("P_sidebar_markdown",),
+    "st.html, which has no typed accessor":
+        ("P_html",),
+    "st.latex":
+        ("P_latex",),
+}
+
+
+def test_p() -> None:
+    probe = os.path.join(tempfile.mkdtemp(prefix="verify_app_probe_"),
+                         "probe_app.py")
+    with open(probe, "w", encoding="utf-8") as fh:
+        fh.write(_PROBE_APP)
+
+    at = AppTest.from_file(probe, default_timeout=TIMEOUT)
+    at.run()
+    check("P0 the probe app renders with no exception", not at.exception,
+          exc_text(at))
+
+    text = page_text(at)
+    for n, (what, markers) in enumerate(_PROBE_MUST_SEE.items(), start=1):
+        unseen = [mk for mk in markers if mk not in text]
+        check(f"P{n} the harvest reaches {what}", not unseen,
+              f"invisible to page_text: {unseen}")
+
+    # The harvest must not be *so* wide that it reports session state as copy:
+    # a slider's value is 5 and a button's is False, and a bare "5" in the
+    # harvest would weaken every numeric leak probe in test_l.
+    check("P12 widget values are not harvested as page copy",
+          "\nFalse\n" not in f"\n{text}\n".replace("\n\n", "\n"),
+          "a widget's bool value reached the harvest")
+
+    # Finally: the old seven-accessor harvest must demonstrably have been
+    # narrower, or this whole section is decoration.
+    old: list[str] = []
+    for kind in ("markdown", "caption", "text", "info", "warning", "error",
+                 "success"):
+        try:
+            old += [str(el.value) for el in getattr(at, kind)]
+        except Exception:
+            pass
+    old_text = "\n".join(old)
+    blind = [mk for group in _PROBE_MUST_SEE.values() for mk in group
+             if mk not in old_text]
+    check("P13 the widened harvest sees strictly more than the old one",
+          len(blind) > 0 and all(mk in text for mk in blind),
+          f"{len(blind)} marker(s) the old harvest missed: {blind[:6]}")
+
+
 def test_e() -> None:
     at = fresh_app()
     check("E1 the app renders with no exception on first load",
@@ -591,16 +710,29 @@ def test_i() -> None:
         check("I1 the app renders with no key configured", not at.exception,
               exc_text(at))
         text = page_text(at)
-        check("I2 the panel presents the layer as the briefings on the role tabs",
-              "Nugen language layer" in text
-              and "Every role tab carries a Nugen briefing" in text)
-        check("I3 it states the layer is off, and how to switch it on",
-              "Briefing layer is off" in text and "NUGEN_API_KEY" in text)
+        # Inverted from "the panel explains the layer" — the panel is gone.
+        # An operator is not told what is wired up behind the console, so the
+        # check is that none of the wiring can reach the page.
+        leaked_id = [n for n in
+                     ({nugen_client.MODEL} | set(nugen_client.known_models()))
+                     if n and n in text]
+        check("I2 no model identity reaches the page", not leaked_id,
+              str(leaked_id))
+        key_words = [w for w in ("NUGEN_API_KEY", "HYDRO_NUGEN_KEY",
+                                 "secrets.toml", "API key",
+                                 "environment variable") if w in text]
+        check("I3 no API-key instruction reaches the page", not key_words,
+              str(key_words))
         check("I4 no generate button exists without a key",
               "button:nugen_go" not in widget_keys(at))
-        check("I5 all three role tabs say the layer is off, in one line each",
-              text.count("layer is off, no") == 3,
-              f"found {text.count('layer is off, no')} of 3")
+        # Inverted from "each role tab says the layer is off". With no key the
+        # computed support card renders and says nothing about what is missing,
+        # so the check is that no tab apologises.
+        sorry = [w for w in ("layer is off", "not configured",
+                             "briefing unavailable", "did not answer",
+                             "Try the briefing again") if w in text]
+        check("I5 no role tab apologises for the assistance layer", not sorry,
+              str(sorry))
         check("I6 no key means nothing was sent", seen["n"] == 0,
               f"{seen['n']} call(s)")
 
@@ -629,30 +761,79 @@ def test_i() -> None:
         at = fresh_app()
         check("I9 live mode renders with a key configured", not at.exception,
               exc_text(at))
-        check("I10 the layer's actual spend is reported, not promised",
-              "Spent so far this session" in page_text(at))
+        # Inverted from "the spend is reported". A call count is a fact about
+        # the implementation, not about the basin, so none of it renders. The
+        # constants' literal values are probed too, so a reworded leak fails.
+        txt10 = page_text(at)
+        spend = [w for w in ("Spent so far", "calls left", "completion tokens",
+                             "token cap", "no tokens spent", "budget")
+                 if w in txt10]
+        # Probed in a spend phrase only. A bare search for the number matched
+        # "safe channel limit of 600 m3/s" — the engine's own prose, and a check
+        # that fires on that is worse than no check.
+        spend += [f"{v} calls" for v in (nugen_client.CALL_BUDGET,
+                                         nugen_client.AUTO_CALL_BUDGET)
+                  if f"{v} call" in txt10 or f"of {v} request" in txt10]
+        check("I10 no spend, token or budget figure reaches the page",
+              not spend, str(spend))
         check("I11 the background briefings land", _drain(),
               f"{nugen_client.pending_count()} still in flight")
-        check("I12 one automatic call per role, and no more",
-              sorted(r or "" for r in seen["roles"])
-              == ["dam", "disaster", "farmer"], str(seen["roles"]))
-        check("I13 all three were charged to the automatic allowance",
-              nugen_client.auto_calls_made() == 3
-              and nugen_client.auto_budget_left()
-              == nugen_client.AUTO_CALL_BUDGET - 3,
-              f"{nugen_client.auto_calls_made()} charged, "
-              f"{nugen_client.auto_budget_left()} of "
-              f"{nugen_client.AUTO_CALL_BUDGET} left")
+        # The per-role automatic briefings are gone — the support cards are
+        # computed, so a page render has nothing to dispatch. That is now the
+        # property worth asserting.
+        check("I12 a live render dispatches nothing automatically",
+              seen["n"] == 0 and nugen_client.auto_calls_made() == 0,
+              f"{seen['n']} call(s), {nugen_client.auto_calls_made()} charged")
 
         at.run()
         text = page_text(at)
-        check("I14 the briefing is then on the page for each role",
-              text.count("Stub briefing for the verify_app run") == 3,
-              f"found {text.count('Stub briefing for the verify_app run')} of 3")
+        # I14 asserted the stub briefing text reached all three role tabs.
+        # There is no per-role briefing now; what must reach all three tabs is
+        # the computed support card, which needs no transport at all.
+        check("I14 every role tab carries a computed support card",
+              text.count("Support actions") == 3,
+              f"found {text.count('Support actions')} of 3")
         at.run()
         _drain(2.0)
-        check("I15 re-rendering an unchanged basin spends nothing further",
-              seen["n"] == 3, f"{seen['n']} call(s) after three renders")
+        # I15's property — one situation costs at most one network call however
+        # often it is asked for — moved to the only path that still spends.
+        #
+        # Note WHICH layer is stubbed. Replacing complete() would replace the
+        # cache this is measuring, so the count would be three however well the
+        # client behaved. The transport is stubbed instead, leaving the real
+        # budget, cache and verification logic in the path under test.
+        _nugen_reset()
+        real_post = nugen_client._post
+        posts = {"n": 0}
+
+        def fake_post(messages, key, budget, model):
+            posts["n"] += 1
+            return ("Move the Riverfront zone first, then Low Road. "
+                    "Start with the people who cannot start themselves.",
+                    {}, "", 200)
+
+        # The complete() stub installed for the spend checks above would
+        # intercept before the transport, so the real client is put back for the
+        # duration of this one check — otherwise it measures the stub's cache,
+        # which is not a thing that ships.
+        stub_complete = nugen_client.complete
+        nugen_client.complete = real_complete
+        nugen_client._post = fake_post
+        try:
+            st_ = H.simulate("flash_flood", 12)
+            d_ = H.make_directives(st_)
+            q = nugen_client.SUGGESTED_QUESTIONS[0]
+            answers = [nugen_client.ask(st_, d_, q, "Upper Bhima", api_key="k")
+                       for _ in range(3)]
+        finally:
+            nugen_client._post = real_post
+            nugen_client.complete = stub_complete
+        check("I15 asking one question three times spends one call",
+              posts["n"] == 1, f"{posts['n']} call(s) for three asks")
+        check("I15a a reply that forecasts nothing is allowed to stand",
+              all(a.verified for a in answers),
+              str([(a.result.hazards, a.result.unsupported)
+                   for a in answers if not a.verified][:1]))
 
         check("I16 the automatic allowance is capped below the session budget",
               0 < nugen_client.AUTO_CALL_BUDGET < nugen_client.CALL_BUDGET,
@@ -766,12 +947,21 @@ def test_k() -> None:
               exc_text(at))
 
         text = page_text(at)
-        check("K2 the tab carries the analyst heading, not the old model one",
-              "AI support &amp; analyst" in text
-              and "answered from the state this page just computed" in text)
-        check("K3 it states up front how an answer is produced",
-              "How an answer is produced" in text
-              and "before any model runs" in text)
+        check("K2 the tab carries the assistance heading",
+              "AI assistance" in text
+              and "what the data has already shown" in text)
+        # The tab now opens by stating the boundary rather than narrating the
+        # pipeline: the hazard call belongs to the engine, and this tab does
+        # not touch it.
+        check("K3 it states the engine/assistance boundary up front",
+              "What this tab is for" in text
+              and "made by the physics engine" in text
+              and "nothing here forecasts" in text)
+        check("K3a the three assistance jobs each have a panel",
+              all(h in text for h in ("Patterns in the data", "Where to go",
+                                      "What else is worth doing")),
+              str([h for h in ("Patterns in the data", "Where to go",
+                               "What else is worth doing") if h not in text]))
 
         # ---- the ask surface exists as widgets ---------------------------
         keys = widget_keys(at)
@@ -811,9 +1001,12 @@ def test_k() -> None:
         check("K9 a non-empty computed answer reaches the page",
               len(shown) > 40 and shown in text,
               f"grounded is {len(shown)} char(s), on page: {shown in text}")
-        check("K10 it is presented as computed, with the model not called",
+        # The apology that used to follow this ("the language layer was not
+        # called, by request") is gone: when assistance is absent the computed
+        # answer is simply the answer, and why is not the operator's problem.
+        check("K10 it is presented as computed, with no apology attached",
               "computed from the retrieved data" in text
-              and "The language layer was not called, by request" in text)
+              and "language layer" not in text)
         check("K11 the fields the answer was built from are shown",
               "Evidence retrieved" in text
               and "read by name off the computed state" in text)
@@ -822,13 +1015,13 @@ def test_k() -> None:
               f"{seen['n']} stub call(s), {nugen_client.calls_made()} real")
 
         # ---- the harness reports every stage ------------------------------
-        check("K13 the harness table renders all six stage rows",
-              "AI harness" in text
+        check("K13 the check table renders every stage that is a check",
+              "How this answer was checked" in text
               and all(stage in text for stage in
                       ("Scope check", "Retrieval", "Grounded answer",
-                       "Language model", "Figure check", "Fallback")),
+                       "Figure check", "Fallback")),
               str([st_ for st_ in ("Scope check", "Retrieval",
-                                   "Grounded answer", "Language model",
+                                   "Grounded answer",
                                    "Figure check", "Fallback")
                    if st_ not in text]))
 
@@ -853,7 +1046,7 @@ def test_k() -> None:
               oos is not None and not oos.in_scope and not oos.digest
               and oos.result is None
               and "This console does not hold that" in text
-              and "nothing was sent" in text,
+              and "Out of scope" in text,
               f"in_scope={getattr(oos, 'in_scope', None)}, "
               f"digest={len(getattr(oos, 'digest', '') or '')} char(s), "
               f"result={getattr(oos, 'result', None)!r}")

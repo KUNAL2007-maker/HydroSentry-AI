@@ -634,7 +634,7 @@ def build_guide_pdf(filename="HydroSentry-AI_Judge_and_NonTech_Guide.pdf"):
     ]
     p3 = [
         "<b>3. Hyper-Local Evacuation: Halting City-Wide Panic</b>",
-        "Conventional sirens trigger city-wide panic, traffic jams, and hospital gridlock. HydroSentry-AI uses 2D river stage calculations to target only specific low-lying sectors (Sector 4 Riverfront, Low Road). Police evacuate 450 families while the remaining city operates normally."
+        "Conventional sirens trigger city-wide panic, traffic jams, and hospital gridlock. HydroSentry-AI computes downstream river stage against the levee crest and targets only the specific low-lying sectors (Sector 4 Riverfront, Low Road). Police evacuate 450 families, in a computed order of movement, while the remaining city operates normally."
     ]
     story.append(make_card(None, p1, bg_color=BG_GREEN_50, border_color=BORDER_GREEN, width=PRINTABLE_WIDTH, pad_v=4, pad_h=7))
     story.append(Spacer(1, 3.5))
@@ -735,10 +735,10 @@ def build_guide_pdf(filename="HydroSentry-AI_Judge_and_NonTech_Guide.pdf"):
         Paragraph('"To solve this, we built HydroSentry-AI: an intelligent, physics-guided command console for flood and drought resilience. Instead of just displaying raw radar charts, it translates satellite observations into immediate, plain-language action orders for three critical frontline groups: dam operators, rural farmers, and city rescue teams."', styles['PitchWords']),
         Spacer(1, 3.5),
         Paragraph("<b>1:00 &mdash; 1:30 &nbsp;|&nbsp; THE LIVE SCREEN & CORE INNOVATION</b>", styles['PitchSpeaker']),
-        Paragraph('"As you see on screen, our console opens directly in Live Satellite Mode, streaming real-time observations from Open-Meteo. When I switch to our Dipole scenario and click Play, our physics engine simulates the entire river wave in just 82.9 seconds&mdash;that is 100 times faster than traditional HEC-RAS software! And unlike standard AI models that hallucinate fake water, our model strictly conserves mass: zero fake numbers, 100% offline capable in any disaster bunker."', styles['PitchWords']),
+        Paragraph('"As you see on screen, our console opens directly in Live Satellite Mode, streaming real-time observations from Open-Meteo. When I switch to our Dipole scenario and click Play, our physics engine re-solves the entire river wave in <b>milliseconds</b>&mdash;and that execution time is measured and printed on the Overview tab for every single update, not quoted from a paper. Here is the design decision we most want you to hold us to: <b>the hazard call is made by the calculated flow</b>&mdash;flood or no flood, how high, how soon&mdash;never by a language model. Mass is strictly conserved, and the engine runs 100% offline in any disaster bunker."', styles['PitchWords']),
         Spacer(1, 3.5),
         Paragraph("<b>1:30 &mdash; 2:00 &nbsp;|&nbsp; THE IMPACT & CLOSING</b>", styles['PitchSpeaker']),
-        Paragraph('"On Tab 2, we generate automated SMS advisories in Marathi and Hindi for farmers before root wilting begins. On Tab 3, our FIRO gate schedule keeps Khadakwasla safe while saving drinking water for the summer. And on Tab 4, we pinpoint exact streets to evacuate without causing city-wide panic. HydroSentry-AI turns climate forecasts into life-saving action. Thank you, and we welcome your questions!"', styles['PitchWords']),
+        Paragraph('"On Tab 2, we generate automated SMS advisories in Marathi and Hindi for farmers before root wilting begins. On Tab 3, our FIRO gate schedule keeps Khadakwasla safe while saving drinking water for the summer. On Tab 4, we pinpoint exactly which streets move, and in what order. Our AI layer helps with precisely three things&mdash;where to go, what to do about it, and alerting you to patterns already in the data&mdash;and it chooses only from options the engine computed. HydroSentry-AI turns climate data into life-saving action. Thank you, and we welcome your questions!"', styles['PitchWords']),
     ]
     story.append(make_card("Word-for-Word 2-Minute Speaking Script", script_p, bg_color=BG_SLATE_50, border_color=PRIMARY_NAVY, width=PRINTABLE_WIDTH, pad_v=5, pad_h=7))
     story.append(Spacer(1, 6))

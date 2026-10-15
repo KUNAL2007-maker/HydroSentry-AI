@@ -40,7 +40,7 @@ QUOTA DISCIPLINE (the account allows 500 tokens per completion)
   request more, whatever it passes.
 * The default request is smaller still (``DEFAULT_MAX_TOKENS``) because an
   operator briefing is a few sentences, not an essay. A single-role briefing is
-  smaller again (``ROLE_MAX_TOKENS``).
+  smaller again for a single question.
 * The prompt is built from a compact digest of the state and hard-truncated
   (``_PROMPT_CHAR_LIMIT``) so input tokens stay bounded too. A role digest
   carries only that role's own facts, so it is cheaper than the combined one.
@@ -131,6 +131,9 @@ class NugenResult:
     usage: dict = field(default_factory=dict)
     # Figures in the reply that do not appear in the facts it was given.
     unsupported: list = field(default_factory=list)
+    # Fragments where the reply stated or forecast a hazard, which is this
+    # layer's one forbidden act. Non-empty means the wording is discarded.
+    hazards: list = field(default_factory=list)
 
     @property
     def tokens_out(self) -> int:
@@ -349,162 +352,6 @@ def reset_cache() -> None:
         _async_out.clear()
 
 
-# ---------------------------------------------------------------------------
-# Prompt construction
-#
-# Shape matters more than wording on a small model. Three shapes were tried live
-# against this endpoint before settling here:
-#   * instruction + facts in one user turn  -> drifts into a "- - -" loop;
-#   * system instruction + facts only       -> echoes the facts back verbatim;
-#   * system + ONE worked example + facts   -> clean, correctly-numbered prose.
-# So the request carries a single fixed example (about 180 input tokens, paid
-# once per call and never regenerated) and the live facts as the final turn.
-# ---------------------------------------------------------------------------
-SYSTEM_PROMPT = (
-    "You are a river-basin flood control room briefing officer. Rewrite the "
-    "facts the user gives you as a short duty-officer briefing of three or four "
-    "plain-English sentences. Use only the numbers given. Never add, estimate or "
-    "change a number, and never invent an instruction."
-)
-
-_EXAMPLE_FACTS = (
-    "Basin: Krishna Basin (Sangli). Time: 02 Aug 2026, 09:00 IST.\n"
-    "Flood: WATCH. Peak inflow 410 m3/s expected in 6.0 h. Reservoir 64% full. "
-    "Recommended release 150 m3/s.\n"
-    "Drought: safe. Evaporative stress percentile 55.\n"
-    "Dam order: Hold normal release and ready the gates.\n"
-    "Disaster order: No evacuation required, keep teams on standby.\n"
-    "Farmer order: No irrigation action needed."
-)
-_EXAMPLE_BRIEFING = (
-    "Inflow is rising towards 410 m3/s in about six hours, with the reservoir at "
-    "64% and release held at 150 m3/s. The dam team should keep the normal "
-    "release and have the gates ready. No evacuation is needed, but response "
-    "teams stay on standby. Farmers can keep their usual irrigation schedule."
-)
-
-# ---------------------------------------------------------------------------
-# Per-role briefings
-#
-# The console already states the decision once, authoritatively, in each role
-# tab's directive card. What it cannot do is say it twice — once as an order and
-# once in the register the reader actually uses. A duty engineer wants release
-# rates; a farmer wants to know whether to irrigate this week; a disaster officer
-# wants minutes and sectors. Same decision, three readers.
-#
-# Each role therefore gets its own instruction and its own worked example, in the
-# same three-turn shape proven above. The example is what keeps a small model from
-# echoing the facts back, so it is not optional — but it is also the bulk of the
-# input cost, which is why ROLE_MAX_TOKENS is small and the role digests below
-# carry only the facts that role is allowed to mention.
-# ---------------------------------------------------------------------------
-ROLE_MAX_TOKENS = 150       # two or three sentences for one reader
-
-ROLES: dict[str, dict] = {
-    "farmer": {
-        "label": "For the farmer",
-        "system": (
-            "You are an agricultural extension officer speaking to a smallholder "
-            "farmer. Rewrite the facts as two or three short, plain sentences "
-            "about water and the crop. No jargon, no percentages the facts do "
-            "not give you. Use only the numbers given, never add or change one, "
-            "and never invent an instruction."
-        ),
-        "example_facts": (
-            "Basin: Krishna Basin (Sangli).\n"
-            "Drought: watch. Evaporative stress percentile 38. Soil moisture "
-            "0.19 m3/m3. Days to wilting 6. Rain now 0.0 mm/hr.\n"
-            "Farmer order: Begin deficit irrigation. Irrigate at 60% of normal "
-            "depth on a 3-day cycle."
-        ),
-        "example_briefing": (
-            "The soil is drying faster than the crop can draw on it, and at this "
-            "rate the root zone reaches wilting point in about 6 days. Start "
-            "irrigating at 60% of your normal depth, once every three days, "
-            "rather than waiting for the crop to show stress. No rain is falling "
-            "now, so do not count on it to make up the shortfall."
-        ),
-    },
-    "dam": {
-        "label": "For the duty engineer",
-        "system": (
-            "You are writing the shift note for the duty engineer in a reservoir "
-            "control room. Rewrite the facts as two or three short sentences: "
-            "what the inflow is doing, what the storage is, and what to do with "
-            "the gates. Use only the numbers given, never add or change one, and "
-            "never invent an instruction."
-        ),
-        "example_facts": (
-            "Basin: Krishna Basin (Sangli).\n"
-            "Flood: WARNING. Peak inflow 820 m3/s expected in 4.0 h. Reservoir "
-            "71% full. Current release 140 m3/s. Recommended release 310 m3/s. "
-            "Not spilling.\n"
-            "Dam order: Begin pre-release now. Step release to 310 m3/s over the "
-            "next two hours."
-        ),
-        "example_briefing": (
-            "Inflow peaks near 820 m3/s in about four hours against 71% storage, "
-            "so the buffer has to be opened up before the surge arrives. Step the "
-            "release from 140 to 310 m3/s over the next two hours. The reservoir "
-            "is not spilling yet, and pre-releasing now is what keeps it that way."
-        ),
-    },
-    "disaster": {
-        "label": "For the disaster officer",
-        "system": (
-            "You are writing the situation line for a district disaster "
-            "management officer. Rewrite the facts as two or three short "
-            "sentences: how long there is, who is exposed, and what to do now. "
-            "Use only the numbers given, never add or change one, and never "
-            "invent an instruction."
-        ),
-        "example_facts": (
-            "Basin: Krishna Basin (Sangli).\n"
-            "Flood: CRITICAL. River 1.2 m above the levee crest. Time to "
-            "overtopping 85 min. Households at risk 1030. Downstream flow 870 "
-            "m3/s against a levee capacity of 700 m3/s.\n"
-            "Disaster order: Evacuate the low-lying riverside sectors now. Move "
-            "residents to the high-ground shelters."
-        ),
-        "example_briefing": (
-            "The river tops the levee in about 85 minutes, by roughly 1.2 m, "
-            "putting 1030 households in the riverside sectors inside the flood "
-            "envelope. Start moving them to the high-ground shelters now rather "
-            "than on confirmation. Downstream flow is already 870 m3/s against a "
-            "700 m3/s levee capacity, so the margin is gone."
-        ),
-    },
-}
-
-
-def build_messages(digest: str, role: str | None = None) -> list[dict]:
-    """The exact message list sent to the endpoint for a set of facts.
-
-    With ``role`` set, the audience-specific instruction and worked example from
-    ``ROLES`` replace the combined ones — same three-turn shape, different reader.
-    """
-    cfg = ROLES.get(role or "")
-    return [
-        {"role": "system", "content": cfg["system"] if cfg else SYSTEM_PROMPT},
-        {"role": "user",
-         "content": cfg["example_facts"] if cfg else _EXAMPLE_FACTS},
-        {"role": "assistant",
-         "content": cfg["example_briefing"] if cfg else _EXAMPLE_BRIEFING},
-        {"role": "user", "content": digest},
-    ]
-
-
-def transcript(digest: str, role: str | None = None) -> str:
-    """Human-readable rendering of ``build_messages`` for the UI's audit panel."""
-    return "\n\n".join(f"[{msg['role']}]\n{msg['content']}"
-                       for msg in build_messages(digest, role))
-
-
-def preview(state, directives, place_name: str = "") -> str:
-    """Everything that would be sent for this state — nothing is hidden."""
-    return transcript(build_digest(state, directives, place_name))
-
-
 def _strip_markup(text: str) -> str:
     """Normalise a directive string for the model: no HTML, no odd glyphs.
 
@@ -517,62 +364,6 @@ def _strip_markup(text: str) -> str:
            .replace("m³/s", "m3/s").replace("³", "3")
            .replace(" — ", ", ").replace("—", ", "))
     return " ".join(out.split()).strip()
-
-
-def build_digest(state, directives, place_name: str = "") -> str:
-    """The facts the briefing may use — nothing else is sent.
-
-    Deliberately terse, and phrased as ordinary sentences: the model is
-    re-wording, not reasoning, and every character here costs input tokens
-    against the account budget.
-    """
-    def _num(value, fmt="{:.0f}", dash=""):
-        try:
-            if value is None:
-                return dash
-            fv = float(value)
-            if fv != fv or fv in (float("inf"), float("-inf")):
-                return dash
-            return fmt.format(fv)
-        except (TypeError, ValueError):
-            return dash
-
-    peak = _num(getattr(state, "inflow_peak", None))
-    peak_in = _num(getattr(state, "inflow_peak_in_h", None), "{:.1f}")
-    res_pct = _num(getattr(state, "reservoir_pct", None))
-    release = _num(getattr(state, "firo_release", None))
-    esp = _num(getattr(state, "esp", None))
-    wilt = _num(getattr(state, "days_to_wilting", None))
-
-    flood = [f"Flood: {str(getattr(state, 'flood_sev', 'unknown')).upper()}."]
-    if peak:
-        flood.append(f"Peak inflow {peak} m3/s expected"
-                     + (f" in {peak_in} h." if peak_in else "."))
-    if res_pct:
-        flood.append(f"Reservoir {res_pct}% full.")
-    if release:
-        flood.append(f"Recommended release {release} m3/s.")
-
-    drought = [f"Drought: {getattr(state, 'drought_sev', 'unknown')}."]
-    if esp:
-        drought.append(f"Evaporative stress percentile {esp}.")
-    if wilt:
-        drought.append(f"Days to wilting {wilt}.")
-
-    lines = [
-        f"Basin: {place_name or 'the basin'}. "
-        f"Time: {getattr(state, 'clock', 'unknown')}.",
-        " ".join(flood),
-        " ".join(drought),
-    ]
-    for role, label in (("dam", "Dam order"), ("disaster", "Disaster order"),
-                        ("farmer", "Farmer order")):
-        item = (directives or {}).get(role) or {}
-        if not item:
-            continue
-        first = (item.get("actions") or [""])[0]
-        lines.append(_strip_markup(f"{label}: {item.get('title', '')}. {first}"))
-    return "\n".join(ln for ln in lines if ln)
 
 
 def _bucket(value, step: float, fmt: str = "{:.0f}", dash: str = "") -> str:
@@ -593,109 +384,6 @@ def _bucket(value, step: float, fmt: str = "{:.0f}", dash: str = "") -> str:
         return fmt.format(round(fv / step) * step)
     except (TypeError, ValueError):
         return dash
-
-
-def build_role_digest(state, directives, role: str, place_name: str = "") -> str:
-    """The facts one role's briefing may use — nothing else is sent.
-
-    Narrower than ``build_digest`` on purpose: a farmer briefing that mentions
-    gate schedules is noise, and every character here is an input token. Three
-    deliberate choices:
-
-    * **No wall clock.** The combined digest carries ``state.clock`` because its
-      audit panel is about one moment. A role digest is hashed as a cache and
-      auto-fire key, so including a clock that ticks every minute would re-bill
-      three briefings a minute on a basin that had not changed. Timing is carried
-      relatively instead ("in 4.0 h", "85 min"), which is what the reader needs.
-    * **Bucketed numbers**, for the same reason — see ``_bucket``.
-    * **The role's own order, under its usual label.** The label is what
-      ``_looks_degenerate`` greps for to catch a model that echoed the facts back
-      instead of re-wording them.
-    """
-    if role not in ROLES:
-        raise KeyError(f"unknown briefing role {role!r}")
-
-    lines = [f"Basin: {place_name or 'the basin'}."]
-
-    if role == "farmer":
-        esp = _bucket(getattr(state, "esp", None), 1)
-        sm = _bucket(getattr(state, "soil_moisture", None), 0.01, "{:.2f}")
-        wilt = _bucket(getattr(state, "days_to_wilting", None), 1)
-        rain = _bucket(getattr(state, "rain_now", None), 0.5, "{:.1f}")
-        facts = [f"Drought: {getattr(state, 'drought_sev', 'unknown')}."]
-        if esp:
-            facts.append(f"Evaporative stress percentile {esp}.")
-        if sm:
-            facts.append(f"Soil moisture {sm} m3/m3.")
-        if wilt:
-            facts.append(f"Days to wilting {wilt}.")
-        if rain:
-            facts.append(f"Rain now {rain} mm/hr.")
-        lines.append(" ".join(facts))
-
-    elif role == "dam":
-        peak = _bucket(getattr(state, "inflow_peak", None), 10)
-        peak_in = _bucket(getattr(state, "inflow_peak_in_h", None), 0.5, "{:.1f}")
-        res_pct = _bucket(getattr(state, "reservoir_pct", None), 1)
-        now_rel = _bucket(getattr(state, "release_now", None), 5)
-        firo = _bucket(getattr(state, "firo_release", None), 5)
-        facts = [f"Flood: {str(getattr(state, 'flood_sev', 'unknown')).upper()}."]
-        if peak:
-            # "expected in 0.0 h" is how a rounded zero reads, and it is not a
-            # fact — at the peak or past it, say so in words the reader uses.
-            if getattr(state, "past_peak", False):
-                facts.append(f"Peak inflow {peak} m3/s, already passed.")
-            elif peak_in and float(peak_in) > 0:
-                facts.append(f"Peak inflow {peak} m3/s expected in {peak_in} h.")
-            else:
-                facts.append(f"Peak inflow {peak} m3/s, arriving now.")
-        if res_pct:
-            facts.append(f"Reservoir {res_pct}% full.")
-        if now_rel:
-            facts.append(f"Current release {now_rel} m3/s.")
-        if firo:
-            facts.append(f"Recommended release {firo} m3/s.")
-        facts.append("Spilling." if getattr(state, "spilling", False)
-                     else "Not spilling.")
-        lines.append(" ".join(facts))
-
-    else:                                                   # disaster
-        depth = _bucket(getattr(state, "overtop_depth", None), 0.1, "{:.1f}")
-        q_down = _bucket(getattr(state, "q_downstream", None), 10)
-        hh = _bucket(getattr(state, "households_at_risk", 0) or 0, 1,
-                     dash="0")
-        tto_raw = getattr(state, "time_to_overtop_min", float("inf"))
-        facts = [f"Flood: {str(getattr(state, 'flood_sev', 'unknown')).upper()}."]
-        if depth and float(depth) > 0:
-            facts.append(f"River {depth} m above the levee crest.")
-        # time_to_overtop_min is inf when the river stays in channel and can round
-        # to zero when the crest is already going under. Both are statements, not
-        # "0 min", which would read as a missing number to the model and the eye.
-        if not math.isfinite(tto_raw):
-            facts.append("The river stays within the levee.")
-        elif tto_raw <= 1.0:
-            facts.append("The levee is overtopping now.")
-        else:
-            facts.append(f"Time to overtopping {_bucket(tto_raw, 5)} min.")
-        facts.append(f"Households at risk {hh}.")
-        if q_down:
-            facts.append(f"Downstream flow {q_down} m3/s against a levee "
-                         f"capacity of 700 m3/s.")
-        lines.append(" ".join(facts))
-
-    item = (directives or {}).get(role) or {}
-    if item:
-        label = {"farmer": "Farmer order", "dam": "Dam order",
-                 "disaster": "Disaster order"}[role]
-        first = (item.get("actions") or [""])[0]
-        lines.append(_strip_markup(f"{label}: {item.get('title', '')}. {first}"))
-    return "\n".join(ln for ln in lines if ln)
-
-
-def role_preview(state, directives, role: str, place_name: str = "") -> str:
-    """Everything that would be sent for one role — nothing is hidden."""
-    return transcript(build_role_digest(state, directives, role, place_name),
-                      role)
 
 
 _NUM_RE = re.compile(r"\d+(?:[.,]\d+)*")
@@ -761,6 +449,136 @@ def _looks_degenerate(text: str, digest: str,
 
 
 # ---------------------------------------------------------------------------
+# The hazard guard
+#
+# The deterministic backstop for the rule this layer exists under: the engine
+# states hazards, and the assistance layer does not. A reply that forecasts
+# anyway is discarded and the computed answer stands.
+#
+# Two design decisions carry the whole thing, and both are there to protect the
+# FALSE POSITIVE case, because a guard that fires on correct output is worse
+# than no guard at all — it would censor the console's own engine:
+#
+#   * A compound-noun shield. The bare word "flood" has to pass, because
+#     "move to the flood shelter", "the flood envelope" and "the flood-affected
+#     sectors" are exactly the safe-place wording this layer is FOR. Only
+#     "flood" in a predictive construction is caught.
+#   * Forward clock only. "in the last 3 hours" passes: reporting what already
+#     happened is the alert job. Only "in 3 hours" is a forecast.
+#
+# And one exemption: ``allow`` takes the fact sheet the model was handed, so a
+# fragment occurring verbatim in the facts is a quotation of the engine rather
+# than a claim of the model's own. That is the same reasoning
+# ``unsupported_numbers`` already applies to figures.
+#
+# WARNING — only ever call this on MODEL OUTPUT. The engine's own correct
+# prose legitimately trips it ("the levee overtops in 85 min" is a true
+# statement the engine is entitled to make), so it must never be applied to
+# ``Answer.grounded``, to a digest, to a directive, or to a Pattern's detail.
+# ---------------------------------------------------------------------------
+_HZ_TAIL = (r"(?:shelter|relief|camp|cent(?:re|er)|envelope|zone|gate|plain"
+            r"|wall|warning|watch|severity|level|line|sector|map|kit|depot"
+            r"|protocol|pool|season|control|response|team|cell|desk|bund"
+            r"|marker|mark|post|advisory|bulletin|siren|alarm|barrier"
+            r"|defence|defense|insurance|routine|drill|irrigation|tanker"
+            r"|convoy|bus|boat|helpline|register|list|report)s?\b")
+_HZ_BRIDGE = r"(?:[-\s]+(?:affected|hit|prone|free|related|resilient|stricken))?"
+_HZ_NOT_COMPOUND = r"(?!%s[-\s]+%s)" % (_HZ_BRIDGE, _HZ_TAIL)
+
+_HZ_HAZARD = (
+    r"(?:flood(?:s|ing|ed)?%(nc)s|drought%(nc)s"
+    r"|inundat(?:e|es|ed|ing|ion)|overtop(?:s|ped|ping)?"
+    r"|breach(?:es|ed|ing)?|submerg(?:e|es|ed|ing)|spill(?:s|ed|ing)?(?!way)"
+    r"|under\s*water|go(?:es|ing)?\s+under|dry(?:ing)?\s+out"
+    r"|dr(?:ies|y)\s+up|wilt(?:s|ed|ing)?|crop\s+failure|cloudburst"
+    r"|surge(?:s|d|ing)?|crest(?:s|ed|ing)?|peak(?:s|ed|ing)?"
+    r"|ris(?:e|es|en|ing)|swell(?:s|ing)?|exceed(?:s|ed|ing)?"
+    r"|top(?:s|ped|ping)?\s+the\s+(?:levee|bund|crest|embankment)"
+    r"|danger\s+(?:mark|level))" % {"nc": _HZ_NOT_COMPOUND})
+
+# "should" and "must" are deliberately absent: the entire mitigation register is
+# built on them, and catching them would censor every measure this layer exists
+# to deliver.
+_HZ_MODAL = (r"(?:will|'ll|shall|won't|going\s+to|about\s+to|set\s+to"
+             r"|due\s+to|on\s+(?:track|course)\s+to|poised\s+to"
+             r"|headed\s+for|heading\s+for|bound\s+for"
+             r"|expect(?:s|ed|ing)?|anticipat(?:e|es|ed|ing)"
+             r"|forecast(?:s|ed|ing)?|predict(?:s|ed|ing)?"
+             r"|project(?:s|ed|ing)?|likel(?:y|ihood)|probabl[ey]"
+             r"|may|might|could|imminent|impending|looming)")
+
+_HZ_NUM = (r"(?:\d[\d,.]*|a|an|one|two|three|four|five|six|seven|eight|nine"
+           r"|ten|twelve)")
+_HZ_UNIT = r"(?:second|sec|minute|min|hour|hr|day|week)s?\b"
+_HZ_HEDGE = r"(?:about|around|roughly|approximately|some|just|under|over|nearly|almost)"
+# Forward-looking only: the negative lookahead is what lets a retrospective
+# window ("in the last 3 hours") through, which is the alert job.
+_HZ_SOON = (r"(?:(?:in|within|inside)\s+(?!the\s+(?:last|past|previous|preceding))"
+            r"(?:%s\s+)?%s\s*%s"
+            r"|by\s+(?:tomorrow|tonight|midnight|dawn|daybreak|nightfall|morning)"
+            r"|before\s+(?:dawn|midnight|nightfall|morning))"
+            % (_HZ_HEDGE, _HZ_NUM, _HZ_UNIT))
+
+_HZ_TREND = (r"(?:rising|climbing|mounting|swelling|surging|building|drying"
+             r"|falling|dropping|worsening|deteriorating|approaching|nearing"
+             r"|creeping|edging|trending|depleting|outpacing|outstripping"
+             r"|heading|headed|bound|tracking)")
+_HZ_SUBJ = (r"(?:river|water|waters|level|levels|stage|inflow|flow|discharge"
+            r"|soil|moisture|root\s*zone|crop|crops|field|fields|ground"
+            r"|storage|reservoir|crest|basin|situation|conditions?)")
+_HZ_SOFT_V = (r"(?:overtop\w*|breach\w*|crest\w*|inundat\w*|submerg\w*"
+              r"|peak\w*|wilt\w*|dry\s+out|go\s+under)")
+
+W = 40      # proximity window, characters, applied inside one sentence
+
+_HZ_RULES = tuple(re.compile(p, re.I) for p in (
+    r"%s.{0,%d}?%s" % (_HZ_MODAL, W, _HZ_HAZARD),
+    r"%s.{0,%d}?%s" % (_HZ_HAZARD, W, _HZ_MODAL),
+    r"%s.{0,%d}?%s" % (_HZ_HAZARD, W, _HZ_SOON),
+    r"%s.{0,%d}?%s" % (_HZ_SOON, W, _HZ_HAZARD),
+    r"(?:risk|threat|chance|danger|likelihood|probability|odds)\s+of"
+    r".{0,%d}?%s" % (W, _HZ_HAZARD),
+    r"(?:at\s+th(?:is|ese)\s+rate|on\s+current\s+trends?"
+    r"|if\s+(?:this|it)\s+continues|a\s+matter\s+of\s+time)",
+    r"%s\s+(?:is|are)\s+(?:\w+ly\s+)?%s" % (_HZ_SUBJ, _HZ_TREND),
+    r"%s\s+(?:towards?|past|beyond|above|up\s+to|out)\b" % _HZ_TREND,
+    r"faster\s+than\s+(?:the\s+)?(?:crop|soil|root|plant|field)",
+    r"%s\s+(?:arrive\w*|hits?|lands?|comes?)" % _HZ_HAZARD,
+    r"before\s+(?:\w+\s+){0,2}?%s" % _HZ_HAZARD,
+    r"(?:time|minutes|hours|days|eta)\s+to\s+(?:the\s+)?(?:levee\s+)?%s"
+    % _HZ_HAZARD,
+    r"%s\s*%s\s+(?:away\s+)?(?:from|ahead\s+of|shy\s+of)"
+    r"\s+(?:\w+\s+){0,2}?%s" % (_HZ_NUM, _HZ_UNIT, _HZ_HAZARD),
+    r"(?:should|must|has\s+to|have\s+to)\s+(?:\w+\s+){0,2}?%s" % _HZ_SOFT_V,
+))
+
+
+def states_a_hazard(text: str, allow: str = "") -> list:
+    """Fragments where the reply states or forecasts a hazard. Never raises.
+
+    ``allow`` is the fact sheet the model was given; a fragment appearing
+    verbatim there is the engine's own statement being quoted back and is not
+    counted. See this section's header for the false-positive reasoning, and for
+    why this must never be run over the engine's own prose.
+    """
+    body = str(text or "")
+    facts = str(allow or "").lower()
+    found, seen = [], set()
+    for sentence in re.split(r"[.!?;:\n]", body):
+        if len(sentence.strip()) < 4:
+            continue
+        for rule in _HZ_RULES:
+            for mt in rule.finditer(sentence):
+                frag = " ".join(mt.group(0).split())
+                low = frag.lower()
+                if low in seen or (facts and low in facts):
+                    continue
+                seen.add(low)
+                found.append(frag)
+    return found
+
+
+# ---------------------------------------------------------------------------
 # Transport
 # ---------------------------------------------------------------------------
 def _parse_stream(response) -> str:
@@ -819,7 +637,8 @@ def _cached_copy(hit: "NugenResult") -> "NugenResult":
     """A detached copy of a cached result, flagged as served from cache."""
     return NugenResult(ok=hit.ok, text=hit.text, error=hit.error, cached=True,
                        model=hit.model, max_tokens=hit.max_tokens,
-                       usage=dict(hit.usage), unsupported=list(hit.unsupported))
+                       usage=dict(hit.usage), unsupported=list(hit.unsupported),
+                       hazards=list(hit.hazards))
 
 
 _MODEL_404_HINT = "unable to resolve model"
@@ -945,7 +764,8 @@ def complete(digest: str, api_key: str | None = None,
                 max_tokens=budget, model=mdl)
         _calls_made += 1
 
-    msgs = messages if messages is not None else build_messages(digest, role)
+    msgs = (messages if messages is not None
+            else build_analyst_messages(digest))
     text, usage, err, status = _post(msgs, key, budget, mdl)
 
     # A 404 naming the model means the catalogue moved under us. Re-read it and
@@ -987,7 +807,8 @@ def complete(digest: str, api_key: str | None = None,
     else:
         result = NugenResult(ok=True, text=text, max_tokens=budget, usage=usage,
                              model=mdl,
-                             unsupported=unsupported_numbers(text, digest))
+                             unsupported=unsupported_numbers(text, digest),
+                             hazards=states_a_hazard(text, digest))
 
     # Cache the model's verdict either way: temperature is 0.1, so an immediate
     # retry would spend quota to receive the same answer. Transport failures
@@ -996,21 +817,6 @@ def complete(digest: str, api_key: str | None = None,
         with _lock:
             _cache[cid] = result
     return result
-
-
-def brief(state, directives, place_name: str = "", api_key: str | None = None,
-          max_tokens: int = DEFAULT_MAX_TOKENS) -> NugenResult:
-    """Convenience wrapper: digest a BasinState + directives, then complete."""
-    return complete(build_digest(state, directives, place_name),
-                    api_key=api_key, max_tokens=max_tokens)
-
-
-def brief_role(state, directives, role: str, place_name: str = "",
-               api_key: str | None = None,
-               max_tokens: int = ROLE_MAX_TOKENS) -> NugenResult:
-    """Blocking single-role briefing. Used by the audit panel and the tests."""
-    return complete(build_role_digest(state, directives, role, place_name),
-                    api_key=api_key, max_tokens=max_tokens, role=role)
 
 
 # ---------------------------------------------------------------------------
@@ -1055,7 +861,7 @@ def pending_count() -> int:
 
 
 def request_async(digest: str, api_key: str | None = None,
-                  max_tokens: int = ROLE_MAX_TOKENS, role: str | None = None,
+                  max_tokens: int = DEFAULT_MAX_TOKENS, role: str | None = None,
                   auto: bool = True, retry: bool = False) -> NugenResult | None:
     """Ask for a briefing without blocking the rerun.
 
@@ -1144,15 +950,6 @@ def request_async(digest: str, api_key: str | None = None,
     return None
 
 
-def request_role_async(state, directives, role: str, place_name: str = "",
-                       api_key: str | None = None, auto: bool = True,
-                       retry: bool = False) -> NugenResult | None:
-    """``request_async`` for one role's facts — what the role tabs call."""
-    return request_async(build_role_digest(state, directives, role, place_name),
-                         api_key=api_key, max_tokens=ROLE_MAX_TOKENS, role=role,
-                         auto=auto, retry=retry)
-
-
 # ===========================================================================
 # THE ANALYST — grounded question answering over the computed state
 #
@@ -1229,7 +1026,8 @@ class Answer:
     def verified(self) -> bool:
         """True when the model's wording passed every check and may be shown."""
         return bool(self.result and self.result.ok
-                    and not self.result.unsupported)
+                    and not self.result.unsupported
+                    and not self.result.hazards)
 
 
 # ---------------------------------------------------------------------------
@@ -1499,6 +1297,20 @@ _TOPIC_WORDS: dict = {
     "action_disaster": ("disaster*", "ndrf", "rescue", "response team*",
                         "district officer*"),
     "action_farmer": ("farmer*", "grower*", "cultivator*"),
+    # -- the three assistance jobs ------------------------------------------
+    "safe_place": ("where to go", "where should", "where do", "safe place*",
+                   "safe ground", "safe to", "shelter*", "refuge*", "muster*",
+                   "assembly*", "high ground", "higher ground", "relocat*",
+                   "move to", "take shelter", "destination*", "camp*",
+                   "evacuate to", "go to"),
+    "mitigation": ("mitigat*", "measure*", "reduce", "reducing", "minimis*",
+                   "minimiz*", "protect*", "prepare*", "preparation*",
+                   "precaution*", "damage", "losses", "loss", "prevent*",
+                   "what else", "checklist", "steps", "action*", "do about",
+                   "cope", "coping"),
+    "alert": ("alert*", "pattern*", "trend*", "signal*", "notice*", "noticed",
+              "flagged", "anything unusual", "detect*", "warn me",
+              "worth knowing", "watch out", "changed"),
 }
 
 # Naming a desk implies that desk's data: "what should the duty engineer do?"
@@ -1507,6 +1319,12 @@ _DESK_TOPICS: dict = {
     "action_dam": ("release", "reservoir"),
     "action_disaster": ("people", "levee"),
     "action_farmer": ("crop", "soil", "drought"),
+    # Asking where people go is asking about who is exposed and by when;
+    # answering it out of the two severity readings alone, which is what
+    # happened before, is not an answer.
+    "safe_place": ("people", "levee", "timing"),
+    "mitigation": ("overall",),
+    "alert": ("overall",),
 }
 
 # Phrasings that make a question about what to DO rather than what IS. When one
@@ -1571,13 +1389,17 @@ def _off_domain_words(question: str) -> list:
         out.append(word)
     return out
 
+# One question per job, plus one per desk. Deliberately none of them asks what
+# is going to happen: the first entry used to be "How long until the levee
+# overtops, and how many households are exposed?", which is the console offering
+# an operator a one-click route to the forecast this layer must not produce.
 SUGGESTED_QUESTIONS = (
-    "How long until the levee overtops, and how many households are exposed?",
+    "Where should residents go, and in what order?",
+    "What else should we be doing to reduce the damage?",
+    "What patterns in the data are worth knowing about?",
     "What should the duty engineer do with the gates right now?",
-    "Can the reservoir absorb the peak, or do we need to pre-release?",
-    "Should farmers irrigate this week?",
-    "How bad is the flood situation, in plain terms?",
-    "How fast does the engine compute this, and how accurate is it?",
+    "Should farmers irrigate this week, and what else protects the crop?",
+    "How many households are inside the mapped low-lying zone?",
 )
 
 
@@ -1713,34 +1535,56 @@ def _grounded_answer(facts: list) -> str:
     return out.strip()
 
 
+# The instruction, and the one thing it forbids above all.
+#
+# The prohibition is not decoration. Earlier versions of this file told the
+# model to describe "what the inflow is doing" and "how long there is", and
+# demonstrated both in their worked examples — which is to say they instructed a
+# language model to forecast a flood. The hazard call belongs to the physics
+# engine and to nothing else; this layer is for what to do about a call that has
+# already been made. ``states_a_hazard`` is the backstop for when the model
+# ignores this anyway, and at that point the wording is discarded.
 ANALYST_SYSTEM = (
     "You are the duty analyst in a river-basin flood and drought control room. "
     "Answer the operator's question in two or three short sentences, using ONLY "
     "the FACTS given. Quote the exact numbers from the FACTS with their units. "
     "Never add, estimate, convert or change a number, and never invent an "
-    "instruction. If the FACTS do not answer the question, say that this "
-    "console does not hold that figure. Do not greet, do not repeat the "
-    "question back, and do not list the facts."
+    "instruction. "
+    "The flood and drought situation has ALREADY been decided by the control "
+    "room's own calculations and is given to you as settled fact. Never restate "
+    "it as your own conclusion, never predict what the river, the rain, the "
+    "soil or the crop will do next, and never say that something will happen, "
+    "is expected, is likely or is imminent. Report only what the facts already "
+    "show, and what is to be done about it. "
+    "If the FACTS do not answer the question, say that this console does not "
+    "hold that figure. Do not greet, do not repeat the question back, and do "
+    "not list the facts."
 )
 
+# The worked example. It is the single thing a small instruct model
+# pattern-matches against, so it has to demonstrate the compliant shape rather
+# than merely be adjacent to a rule asking for it. Note what it does with the
+# severity it is handed: it acts on it, and never re-announces it.
 _ANALYST_EXAMPLE_Q = (
-    "QUESTION: How long before the levee goes under, and who is exposed?\n"
+    "QUESTION: Who moves first, and what else should we be doing?\n"
     "FACTS:\n"
     "Basin: Krishna Basin (Sangli). Time: 02 Aug 2026, 09:00 IST.\n"
-    "Flood severity: WARNING\n"
-    "Time to levee overtopping: 85 min\n"
-    "River above the levee crest: 1.20 m\n"
-    "Households at risk: 1,030 households\n"
-    "Downstream flow: 870 m3/s\n"
-    "Order for the disaster officer: Evacuate the low-lying riverside sectors "
-    "now. Move residents to the high-ground shelters."
+    "Flood severity (already decided): WARNING\n"
+    "Households inside the mapped low-lying zone: 1,030 households\n"
+    "Order of movement: Riverfront first, then Low Road, then Market\n"
+    "Measure [now]: Start with the people who cannot start themselves.\n"
+    "Measure [now]: Cut power and isolate the pumping station in the lowest "
+    "zone.\n"
+    "Noticed in the data: Downstream flow is 870 m3/s, 145% of the 600 m3/s "
+    "safe channel capacity."
 )
 _ANALYST_EXAMPLE_A = (
-    "The levee is about 85 minutes from overtopping, with the river running "
-    "1.20 m above the crest and downstream flow at 870 m3/s. That puts 1,030 "
-    "households inside the flood envelope. The standing order is to evacuate "
-    "the low-lying riverside sectors now and move residents to the high-ground "
-    "shelters."
+    "Move the Riverfront zone first, then Low Road, then Market \u2014 1,030 "
+    "households sit inside the mapped low-lying zone across the three. Start "
+    "with the people who cannot start themselves, and cut power to the pumping "
+    "station in the lowest zone before anyone wades it. Downstream flow is "
+    "already 870 m3/s against a 600 m3/s safe channel, so the margin reported "
+    "in the data has gone."
 )
 
 
@@ -1838,7 +1682,8 @@ def ask(state, directives, question: str, place_name: str = "",
          f"engine's own."),
         ("Grounded answer", "computed",
          "Composed from those fields by rule, before any model ran. This is "
-         "the answer of record and it does not depend on the language layer."),
+         "the answer of record, and it stands whether or not anything "
+         "else runs."),
     ]
 
     # ---- 4. generate ----------------------------------------------------
