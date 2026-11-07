@@ -42,6 +42,7 @@ import streamlit as st
 import hydro_engine as H
 import live_data
 import nugen_client
+from simple_advisor import crisis_advice
 
 try:
     # Optional browser bridge: lets the VISITOR's browser fetch the live feed
@@ -374,6 +375,52 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible{
   [data-testid="stHorizontalBlock"] > [data-testid="column"]{
     flex:1 1 100% !important; width:100% !important; min-width:100% !important; }
   .hs-scroll .hs-table{ min-width:460px; }
+}
+
+/* SIMPLE frontend (default) — one big answer, four plain numbers, cards. --- */
+.hs-simple-banner{ border-radius:14px; padding:22px 24px; margin:4px 0 16px;
+  border:1px solid var(--line); border-left:6px solid var(--safe); background:var(--surface); }
+.hs-simple-banner--safe{ border-left-color:var(--safe); background:#EAF7F0; }
+.hs-simple-banner--watch{ border-left-color:var(--watch); background:#FCF6E4; }
+.hs-simple-banner--warning{ border-left-color:var(--warning); background:#FCF0E7; }
+.hs-simple-banner--critical{ border-left-color:var(--critical); background:#FCEEEC; }
+.hs-simple-banner__h{ font-size:clamp(22px, 4vw, 32px); font-weight:700; line-height:1.2; margin:0; }
+.hs-simple-banner__p{ font-size:17px; line-height:1.55; margin:8px 0 0; color:#33454F; }
+.hs-simple-nums{ display:grid; grid-template-columns:repeat(4, 1fr); gap:12px; margin:0 0 16px; }
+.hs-simple-num{ background:var(--surface); border:1px solid var(--line);
+  border-radius:var(--radius); padding:16px 18px; }
+.hs-simple-num__label{ font-size:16px; color:var(--muted); }
+.hs-simple-num__value{ font-size:clamp(22px, 3vw, 30px); font-weight:700;
+  color:var(--brand); margin-top:6px; line-height:1.15; }
+.hs-simple-num__ctx{ font-size:15px; color:var(--muted); margin-top:6px; line-height:1.45; }
+.hs-simple-card{ background:var(--surface); border:1px solid var(--line);
+  border-radius:var(--radius); padding:18px 20px; margin-bottom:14px;
+  border-left:5px solid var(--safe); }
+.hs-simple-card--watch{ border-left-color:var(--watch); }
+.hs-simple-card--warning{ border-left-color:var(--warning); }
+.hs-simple-card--critical{ border-left-color:var(--critical); }
+.hs-simple-card__h{ font-size:20px; font-weight:700; margin:0 0 6px; }
+.hs-simple-card__p{ font-size:16px; line-height:1.55; margin:0 0 10px; color:#33454F; }
+.hs-simple-card__steps{ margin:0 0 6px; padding-left:20px; }
+.hs-simple-card__steps li{ font-size:16px; line-height:1.55; margin:6px 0; }
+.hs-simple-card__who{ font-size:15px; color:var(--muted); margin:6px 0 0; }
+
+/* responsive: phones — stack everything to one column, nothing overflows --- */
+@media (max-width: 768px){
+  html, body, [class*="css"], .stApp, .stMarkdown, p, span, div, li, td, th{
+    font-size:16px; }
+  .block-container{ padding-inline:1rem !important; }
+  .hs-simple-nums{ grid-template-columns:1fr; }
+  .hs-dipole, .hs-readouts, .hs-arch{ grid-template-columns:1fr !important; }
+  .hs-cmd{ flex-direction:column; align-items:flex-start; }
+  .hs-simple-banner{ padding:18px; }
+  .hs-simple-banner__h{ font-size:24px; }
+  .stButton > button, [data-testid="stButton"] > button{ width:100% !important; }
+  .hs-scroll{ overflow-x:auto; }
+  .hs-scroll .hs-table{ min-width:460px; }
+  .hs-simple-card__steps li, .hs-simple-card__p{ font-size:16px; }
+  [data-testid="stTabs"] [data-baseweb="tab"], [data-testid="stTab"]{
+    padding:0 10px; font-size:16px; }
 }
 @media (prefers-reduced-motion: reduce){
   .hs-live__dot{ animation:none; }
@@ -1148,6 +1195,36 @@ with st.sidebar:
         _age = " · cached" if (obs.ok and obs.stale) else ""
         m(f'<div class="hs-updated">Updated <b>{_when}</b>{_age} · {obs.source}</div>')
 
+        # Dam control lives in the "Dam operator (optional)" expander below,
+        # rendered in BOTH modes — see the bug note there.
+        with st.expander("Live readings", expanded=False):
+            _rows = [
+                ("Temperature", _live_val(obs.temp_now, " °C")),
+                ("Rain peak (8 h)", _live_val(obs.rain_peak, " mm/hr")),
+                ("Root-zone soil", _live_val(obs.soil_moisture, " m³/m³", "{:.2f}")),
+                ("Reference ET₀", _live_val(obs.et0_now, " mm/d")),
+                ("Humidity", _live_val(obs.humidity, " %", "{:.0f}")),
+            ]
+            _rd = ""
+            for _lab, _val in _rows:
+                _rd += ('<div style="display:flex;justify-content:space-between;gap:10px;'
+                        'padding:6px 0;border-bottom:1px solid var(--line);font-size:12.5px;">'
+                        f'<span style="color:var(--muted);">{_lab}</span>'
+                        '<span style="font-family:\'IBM Plex Mono\',monospace;font-weight:600;'
+                        f'color:var(--brand);">{_val}</span></div>')
+            m(_rd)
+            if not obs.ok and obs.error:
+                m(f'<div class="hs-cap" style="margin-top:8px;color:var(--warning);">'
+                  f'Fetch note: {obs.error}</div>')
+
+    # ---- Dam operator (optional) — rendered in BOTH modes ------------------
+    # BUG FIX (7 Nov 2026): the reservoir slider used to live only in the live
+    # branch, so switching Live -> Demo -> Live destroyed the widget and its
+    # session-state value reset to 0. A Streamlit widget only keeps its value
+    # while it is rendered on every run, so the slider now lives here, outside
+    # the mode branches, and is rendered in live AND demo mode. Its value
+    # (ss.res_pct, default 78) now survives a mode switch.
+    with st.expander("Dam operator (optional)", expanded=False):
         m('<div class="hs-rail-h">Interactive Dam Control</div>')
         m('<div class="hs-cap" style="margin:-4px 0 6px;">Manual operator input — '
           'IoT telemetry pending CWC SCADA integration.</div>')
@@ -1161,26 +1238,6 @@ with st.sidebar:
         m('<div class="hs-cap" style="margin:-4px 0 4px;">'
           f'{_rshort} has no free public reservoir-level feed — set the current storage '
           'reading here; the rainfall-driven forecast and pre-release are computed live.</div>')
-
-        m('<div class="hs-rail-h">Live readings</div>')
-        _rows = [
-            ("Temperature", _live_val(obs.temp_now, " °C")),
-            ("Rain peak (8 h)", _live_val(obs.rain_peak, " mm/hr")),
-            ("Root-zone soil", _live_val(obs.soil_moisture, " m³/m³", "{:.2f}")),
-            ("Reference ET₀", _live_val(obs.et0_now, " mm/d")),
-            ("Humidity", _live_val(obs.humidity, " %", "{:.0f}")),
-        ]
-        _rd = ""
-        for _lab, _val in _rows:
-            _rd += ('<div style="display:flex;justify-content:space-between;gap:10px;'
-                    'padding:6px 0;border-bottom:1px solid var(--line);font-size:12.5px;">'
-                    f'<span style="color:var(--muted);">{_lab}</span>'
-                    '<span style="font-family:\'IBM Plex Mono\',monospace;font-weight:600;'
-                    f'color:var(--brand);">{_val}</span></div>')
-        m(_rd)
-        if not obs.ok and obs.error:
-            m(f'<div class="hs-cap" style="margin-top:8px;color:var(--warning);">'
-              f'Fetch note: {obs.error}</div>')
 
     # ---- reference panels — collapsed so the controls above never scroll off
     with st.expander("Data sources", expanded=False):
@@ -2860,6 +2917,234 @@ def _safe_rerun():
         st.rerun()
 
 
+# ============================================================================
+# SIMPLE FRONTEND (default) — physics stays in the backend, the screen stays
+# plain. The old five-tab renderers (render_overview / render_farmer /
+# render_dam / render_disaster / render_analyst) are unchanged and still
+# reachable inside the "For engineers" expander at the bottom of Tab 3, so
+# nothing the engine computed is lost — it is just no longer the first thing
+# a normal person has to read.
+# ============================================================================
+_SIMPLE_BANNER = {
+    "safe": ("All clear — nothing to do today",
+             "The flood risk is low and the soil has enough water."),
+    "watch": ("Keep an eye on it",
+              "Something is building. Nothing to do yet — check again soon."),
+    "warning": ("Be ready — this could get worse",
+                "Conditions are serious. Get ready now, while there is time."),
+    "critical": ("Act now — this is urgent",
+                 "Follow the steps on the next tab. Do not wait."),
+}
+
+
+def _simple_time(minutes) -> str:
+    """Time left in plain words ("about 90 minutes" / "right now")."""
+    try:
+        mins = float(minutes)
+    except (TypeError, ValueError):
+        return "plenty of time"
+    if not math.isfinite(mins):
+        return "plenty of time"
+    if mins <= 1:
+        return "right now — no time left"
+    if mins < 60:
+        return f"about {int(round(mins))} minutes"
+    hours = mins / 60.0
+    if hours < 1.5:
+        return "about an hour"
+    if hours < 2.5:
+        return "about an hour and a half"
+    return f"about {int(round(hours))} hours"
+
+
+def _simple_card_html(card: dict) -> str:
+    steps = "".join(f"<li>{_esc(st)}</li>" for st in card["steps"])
+    return (
+        f'<div class="hs-simple-card hs-simple-card--{card["level"]}">'
+        f'<h3 class="hs-simple-card__h">{_esc(card["title"])}</h3>'
+        f'<p class="hs-simple-card__p">{_esc(card["what"])}</p>'
+        f'<p class="hs-simple-card__p">{_esc(card["why"])}</p>'
+        f'<ol class="hs-simple-card__steps">{steps}</ol>'
+        f'<p class="hs-simple-card__who">Who this is for: {_esc(card["who"])}</p>'
+        '</div>'
+    )
+
+
+def render_simple_safe(s, d, place=None):
+    """Tab 1 — "Are we safe?": one big banner + four plain numbers."""
+    worst = "safe"
+    for sev in (s.flood_sev, s.drought_sev):
+        if {"critical": 0, "warning": 1, "watch": 2, "safe": 3}[sev] < \
+           {"critical": 0, "warning": 1, "watch": 2, "safe": 3}[worst]:
+            worst = sev
+    head, sub = _SIMPLE_BANNER[worst]
+    if worst == "critical" and s.flood_sev == "critical":
+        head = "Flood — move to high ground now"
+        sub = "The river is going to rise above the levee. Follow the steps on the next tab."
+    elif worst == "critical" and s.drought_sev == "critical":
+        head = "Drought — save water now"
+        sub = "The soil is drying out fast. Follow the steps on the next tab."
+    elif worst == "warning" and s.drought_sev in ("warning", "critical"):
+        head, sub = "Drought — save water", "The soil is drying out. Water early in the morning."
+    m(
+        f'<div class="hs-simple-banner hs-simple-banner--{worst}">'
+        f'<h2 class="hs-simple-banner__h">{_esc(head)}</h2>'
+        f'<p class="hs-simple-banner__p">{_esc(sub)}</p>'
+        '</div>'
+    )
+    flood_word = {"safe": "Low", "watch": "Building", "warning": "High",
+                  "critical": "Very high"}[s.flood_sev]
+    # Soil in plain words: dry or OK, and when the crops would wilt.
+    if s.drought_sev in ("warning", "critical"):
+        wilt_days = s.days_to_wilting
+        wilt_txt = (f"wilting in about {int(round(float(wilt_days)))} days"
+                    if math.isfinite(float(wilt_days)) else "wilting soon")
+        soil_word, soil_ctx = "Dry", wilt_txt
+    elif s.drought_sev == "watch":
+        soil_word, soil_ctx = "Getting dry", "keep an eye on it"
+    else:
+        soil_word, soil_ctx = "OK", "enough water for now"
+    m(
+        '<div class="hs-simple-nums">'
+        '<div class="hs-simple-num"><div class="hs-simple-num__label">Flood risk</div>'
+        f'<div class="hs-simple-num__value">{flood_word}</div>'
+        f'<div class="hs-simple-num__ctx">{"River is rising fast" if s.flood_sev in ("warning", "critical") else "River is inside the levee"}</div></div>'
+        '<div class="hs-simple-num"><div class="hs-simple-num__label">Water coming in</div>'
+        f'<div class="hs-simple-num__value">{s.inflow_peak:.0f} m³/s</div>'
+        '<div class="hs-simple-num__ctx">How much water is flowing into the river</div></div>'
+        '<div class="hs-simple-num"><div class="hs-simple-num__label">Time left</div>'
+        f'<div class="hs-simple-num__value">{_esc(_simple_time(s.time_to_overtop_min))}</div>'
+        '<div class="hs-simple-num__ctx">Until the river could go over the levee</div></div>'
+        '<div class="hs-simple-num"><div class="hs-simple-num__label">Soil / crops</div>'
+        f'<div class="hs-simple-num__value">{soil_word}</div>'
+        f'<div class="hs-simple-num__ctx">{_esc(soil_ctx)}</div></div>'
+        '</div>'
+    )
+    m(note("All the hard maths — the physics, the statistics, the model scores — "
+           "still runs behind this page. It is in the <b>For engineers</b> box at "
+           "the bottom of the third tab, not here.", label="Where the numbers went"))
+
+
+def _simple_directive_card(title, who, directive):
+    """One directive from make_directives(), as a simple card with 3 steps."""
+    # Directives carry a little HTML (<b>…</b>); keep the emphasis, it is the
+    # engine's own wording.
+    steps = "".join(f"<li>{a}</li>" for a in directive.get("actions", [])[:3])
+    return (
+        '<div class="hs-simple-card">'
+        f'<h3 class="hs-simple-card__h">{_esc(title)} — for {who}</h3>'
+        f'<p class="hs-simple-card__p">{directive.get("situation", "")}</p>'
+        f'<ol class="hs-simple-card__steps">{steps}</ol>'
+        '</div>'
+    )
+
+
+def render_simple_do(s, d, place=None):
+    """Tab 2 — "What should I do?": the three engine directives, simply."""
+    m(h2("What should I do?", "Three jobs, one per card — from the engine"))
+    m(_simple_directive_card("Farmers", "farmers", d["farmer"]))
+    m(_simple_directive_card("Dam operator", "the dam operator", d["dam"]))
+    m(_simple_directive_card("Disaster team", "the disaster team", d["disaster"]))
+    sms = d.get("sms") or {}
+    if sms:
+        m(
+            '<div class="hs-note"><b>Message sent to farmers:</b> '
+            f'{_esc(sms.get("en", ""))} '
+            f'(Sent to {sms.get("sent", 0):,} farmers in Marathi and Hindi.)</div>'
+        )
+
+
+def _crisis_ai_question(top_card):
+    """The question the AI re-phrase runs through the existing ask() harness."""
+    if "high ground" in top_card["title"].lower():
+        return nugen_client.SUGGESTED_QUESTIONS[0]   # where should residents go?
+    if "water" in top_card["title"].lower():
+        return nugen_client.SUGGESTED_QUESTIONS[4]   # should farmers irrigate?
+    return nugen_client.SUGGESTED_QUESTIONS[0]
+
+
+def render_simple_crisis(s, d, place=None):
+    """Tab 3 — "Crisis help (AI)": grounded advice cards, AI only re-words."""
+    m(h2("Crisis help", "What to do right now — the engine decides, the AI only re-words it"))
+    m(note("The advice below comes from the physics engine, not from AI. "
+           "AI is only ever asked to say the top card again in simpler words — "
+           "and if it cannot, or its wording fails the figure check, you see "
+           "the engine's own words instead.", label="Who decides what"))
+    cards = crisis_advice(s, d, place or H.DEMO_PLACE)
+    for card in cards:
+        m(_simple_card_html(card))
+
+    # ---- AI re-wording of the top card only, on demand --------------------
+    top = cards[0]
+    key = _nugen_key()
+    if st.button("✏️  Say this again in simpler words (AI)",
+                 key="crisis_reword_btn", width="stretch"):
+        if not key:
+            ss["_crisis_reword"] = {"ok": False, "reason": "no-key"}
+        else:
+            with st.spinner("Asking the AI to re-word it…"):
+                ans = nugen_client.ask(
+                    s, d, _crisis_ai_question(top), _nugen_basin_label(),
+                    api_key=key, use_model=True)
+            ss["_crisis_reword"] = {"ok": bool(getattr(ans, "verified", False)),
+                                    "text": (getattr(ans.result, "text", "")
+                                             if getattr(ans, "result", None) else ""),
+                                    "grounded": getattr(ans, "grounded", "")}
+    data = ss.get("_crisis_reword")
+    if data:
+        if data.get("ok") and data.get("text"):
+            m('<div class="hs-layer"><div class="hs-layer__tag">'
+              'AI wording · checked against the engine</div>'
+              f'<div class="hs-layer__p" style="font-size:16px;color:var(--ink);">'
+              f'{_nugen_html(data["text"])}</div>'
+              '<div class="hs-cap" style="margin-top:10px;">Figure check passed: '
+              'every number here appears in the computed state. The card above '
+              'is still the answer of record.</div></div>')
+        else:
+            m('<div class="hs-layer"><div class="hs-layer__tag">'
+              'From the engine, not AI</div>'
+              '<div class="hs-layer__p" style="font-size:16px;color:var(--ink);">'
+              'The AI could not re-word this safely, so here are the engine\'s '
+              'own steps again — they are the ones to follow:</div>'
+              '<ol class="hs-simple-card__steps">'
+              + "".join(f"<li>{_esc(st)}</li>" for st in top["steps"])
+              + '</ol></div>')
+
+    # ---- everything technical, in ONE collapsed expander -------------------
+    st.write("")
+    with st.expander("For engineers — how we calculated this", expanded=False):
+        m(h2("AI assistance",
+             "Where to go, what else to do, and what the data has already shown"))
+        m(note("The flood and drought calls on the other tabs are made by the "
+               "physics engine, not by anything on this one — that is the boundary "
+               "this console is built around, and it does not move. What assistance "
+               "adds is the part the physics does not answer: <b>which patterns in "
+               "the data deserve attention</b>, <b>where people and stock should "
+               "go</b>, and <b>what else is worth doing</b> while there is time. "
+               "Each panel below is drawn from a computed set — the detectors that "
+               "fired, the basin's own zone list, and a fixed catalogue of "
+               "measures — so nothing here is invented and nothing here forecasts.",
+               label="What this tab is for"))
+        _render_alerts(s)
+        st.write("")
+        _render_where_to_go(s, place)
+        st.write("")
+        _render_measures(s)
+        st.write("")
+        _render_ask(s, d)
+        st.write("")
+        m(h2("Engine validation", "The measured evidence behind every number above"))
+        _render_engine_evidence(s, d)
+        st.write("")
+        _render_comparison(s)
+        st.write("")
+        m(h2("The full detail, if you want it", "Every tab the old console had"))
+        render_overview(s, d, place)
+        render_farmer(s, d, place)
+        render_dam(s, d, place)
+        render_disaster(s, d, place)
+
+
 def render_dashboard():
     if ss.mode == "live":
         # A visible loading state while the very first reading is in flight —
@@ -2922,23 +3207,20 @@ def render_dashboard():
 
     render_header(s, obs)
 
-    tab_over, tab_farm, tab_dam, tab_dis, tab_ai = st.tabs([
-        "Overview",
-        "Farmer advisory",
-        "Reservoir operations",
-        "Disaster response",
-        "AI analyst",
+    # SIMPLE frontend (default): 3 tabs in plain language. The old five tabs
+    # are not deleted — their renderers run inside the "For engineers"
+    # expander at the bottom of Tab 3, so every number is still reachable.
+    tab_safe, tab_do, tab_crisis = st.tabs([
+        "Are we safe?",
+        "What should I do?",
+        "Crisis help (AI)",
     ])
-    with tab_over:
-        render_overview(s, d, place)
-    with tab_farm:
-        render_farmer(s, d, place)
-    with tab_dam:
-        render_dam(s, d, place)
-    with tab_dis:
-        render_disaster(s, d, place)
-    with tab_ai:
-        render_analyst(s, d, place)
+    with tab_safe:
+        render_simple_safe(s, d, place)
+    with tab_do:
+        render_simple_do(s, d, place)
+    with tab_crisis:
+        render_simple_crisis(s, d, place)
 
 
 # run_every drives auto-refresh. In demo mode it advances the scenario clock and
