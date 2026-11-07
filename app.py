@@ -374,6 +374,11 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible{
   [data-testid="stHorizontalBlock"] > [data-testid="column"]{
     flex:1 1 100% !important; width:100% !important; min-width:100% !important; }
   .hs-scroll .hs-table{ min-width:460px; }
+  /* phones: Streamlit hides the sidebar behind the ">" menu button — make
+     that button big and tappable so the sidebar is actually findable */
+  [data-testid="collapsedControl"]{ min-width:44px !important; min-height:44px !important;
+    padding:10px !important; background:var(--surface) !important;
+    border:1px solid var(--line) !important; border-radius:10px !important; }
 }
 @media (prefers-reduced-motion: reduce){
   .hs-live__dot{ animation:none; }
@@ -1036,15 +1041,11 @@ with st.sidebar:
         '</div>'
     )
 
-    # ---- MODE SWITCH — pinned at the top, always visible -----------------
-    # This is the toggle to show during the presentation: flip between the
-    # scripted demo and real, live basin data without leaving the console.
-    m('<div class="hs-rail-h">Mode</div>')
-    st.radio(
-        "Mode", ["demo", "live"], key="mode",
-        format_func=lambda k: "🎬  Demo mode" if k == "demo" else "🛰️  Live data",
-        on_change=_on_mode_change, label_visibility="collapsed",
-    )
+    # ---- MODE + DAM LEVEL live in the main panel (see the "Controls" box at
+    # the top of the page) so they are reachable on a phone, where Streamlit
+    # hides the sidebar behind the menu button. The sidebar keeps the rest.
+    m('<div class="hs-cap" style="margin:2px 0 8px;">Mode (Live / Demo) and the '
+      'dam level are in <b>Controls</b> at the top of the main page.</div>')
 
     if ss.mode == "demo":
         # ---- scenario + playback controls (drive the demo engine) --------
@@ -1160,19 +1161,12 @@ with st.sidebar:
         _age = " · cached" if (obs.ok and obs.stale) else ""
         m(f'<div class="hs-updated">Updated <b>{_when}</b>{_age} · {obs.source}</div>')
 
-        m('<div class="hs-rail-h">Interactive Dam Control</div>')
-        m('<div class="hs-cap" style="margin:-4px 0 6px;">Manual operator input — '
-          'IoT telemetry pending CWC SCADA integration.</div>')
-        # key="res_pct" binds the widget straight to session state, so the
-        # "Seasonal Normal" callback below can set it without a value=/key clash.
-        st.slider("Current reservoir % (manual operator input)", 0, 100,
-                  key="res_pct", label_visibility="collapsed")
-        st.button("Set to Seasonal Normal (78%)", key="res_pct_normal_btn",
-                  on_click=_set_seasonal_normal, width="stretch")
-        _rshort = _esc(H.place_from_region(ss.region_name).short)
-        m('<div class="hs-cap" style="margin:-4px 0 4px;">'
-          f'{_rshort} has no free public reservoir-level feed — set the current storage '
-          'reading here; the rainfall-driven forecast and pre-release are computed live.</div>')
+        # Dam level lives in the main-panel "Controls" box (always rendered,
+        # both modes) so its value survives a Live <-> Demo switch — see the
+        # Controls box below. A short pointer here for anyone looking in the
+        # sidebar.
+        m('<div class="hs-cap" style="margin:2px 0 4px;">Dam water level: set it '
+          'in <b>Controls</b> at the top of the main page.</div>')
 
         m('<div class="hs-rail-h">Live readings</div>')
         _rows = [
@@ -3001,6 +2995,37 @@ if ss.mode == "live":
         _run_every = min(_run_every, FIRST_LOAD_POLL_SECS)
 else:
     _run_every = ss.interval if (ss.live and ss.tick < H.TICKS_MAX) else None
+
+# ============================================================================
+# CONTROLS — Live/Demo switch + dam level, in the MAIN panel (not the sidebar)
+# ============================================================================
+# On a phone Streamlit hides the sidebar behind the menu button, so the two
+# controls people actually need — the Live/Demo switch and the dam level —
+# were invisible on mobile. They live here now, at the top of the main page,
+# in both modes. The dam slider is rendered in BOTH modes on purpose: it used
+# to exist only in Live mode, so switching Live -> Demo -> Live destroyed the
+# widget and its value reset to 0% (the reservoir "emptied" itself). Rendered
+# always, the value survives the switch. In Demo mode the slider does not
+# change the scripted scenario; it is kept so the Live value is not lost.
+with st.expander("⚙️  Controls — Live / Demo & dam level", expanded=False):
+    # Mode switch: flip between the scripted demo and real, live basin data.
+    st.radio(
+        "Mode", ["demo", "live"], key="mode",
+        format_func=lambda k: "🎬  Demo mode" if k == "demo" else "🛰️  Live data",
+        on_change=_on_mode_change,
+    )
+    m('<div class="hs-rail-h" style="margin-top:10px;">Dam water level</div>')
+    m('<div class="hs-cap" style="margin:-4px 0 6px;">How full is the dam right '
+      'now? Move the slider to match the dam\'s actual filling — 78% is the '
+      'usual level. There is no live dam-level feed, so the worker sets it by '
+      'hand; the rainfall forecast and gate plan are computed from it. '
+      'Used in Live mode.</div>')
+    # key="res_pct" binds the widget straight to session state, so the
+    # "usual level" callback below can set it without a value=/key clash.
+    st.slider("How full is the dam? (%)", 0, 100, key="res_pct")
+    st.button("Set to usual level (78%)", key="res_pct_normal_btn",
+              on_click=_set_seasonal_normal, width="stretch")
+
 
 st.fragment(render_dashboard, run_every=_run_every)()
 

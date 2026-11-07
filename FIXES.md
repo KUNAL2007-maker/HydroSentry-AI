@@ -113,3 +113,27 @@ original 5-tab frontend is kept — the 3-tab simplification was NOT re-applied.
   identical 81/86 with the same 5 failures. Zero new failures.
 - Smoke test: `streamlit run app.py --server.port 8510 --server.headless true`
   — `curl localhost:8510/` returned 200; server killed cleanly afterwards.
+
+## Reservoir slider reset + mobile controls (7 Nov, after the audit push)
+
+### Reservoir slider reset to 0% on Live -> Demo -> Live
+- Root cause: the dam slider lived only in the Live branch of the sidebar, so
+  switching to Demo destroyed the widget and its value reset to 0% on return.
+- Fix: the slider now lives in a "Controls — Live / Demo & dam level" box at
+  the top of the MAIN panel, rendered in BOTH modes, so its value survives
+  the switch. In Demo mode it does not change the scripted scenario; it is
+  kept so the Live value is not lost.
+- Renamed in plain words for the operator: heading "Dam water level",
+  slider "How full is the dam? (%)", button "Set to usual level (78%)",
+  with the caption "How full is the dam right now? Move the slider to match
+  the dam's actual filling — 78% is the usual level."
+- Verified with Streamlit AppTest: slider starts 78, set to 45, switch to
+  Demo (still 45), switch back to Live (still 45), zero exceptions.
+
+### Sidebar not visible on mobile
+- Root cause: on a phone Streamlit hides the sidebar behind the ">" menu
+  button, so the Live/Demo switch and the dam slider were invisible.
+- Fix: the Live/Demo switch and the dam slider moved out of the sidebar into
+  the main-panel "Controls" box (above), which is always visible on mobile.
+  The sidebar now points to it. The phone menu button was also made bigger
+  (44px, bordered) so the rest of the sidebar is findable.
