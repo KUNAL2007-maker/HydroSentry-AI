@@ -591,7 +591,7 @@ def render_basin_snapshot(s, height=243):
         # agricultural belt (drought signal) — indicative position NE of centre
         {"lat": lat + 0.10, "lon": lon + 0.12, "color": _sev_color(s.drought_sev),
          "radius": 620, "label": "Agricultural belt (indicative)",
-         "detail": f"Drought: {SEV_LABEL[s.drought_sev]} · ESP {s.esp:.1f}th %ile"
+         "detail": f"Drought: {SEV_LABEL[s.drought_sev]} · ESP {s.esp:.1f}{_ordinal_suffix(int(round(s.esp)))} %ile"
                    f"<br/>Root-zone moisture {s.soil_moisture:.3f} m³/m³ · {wilt}"},
         # riverside / reservoir (flood signal) — indicative position SW of centre
         {"lat": lat - 0.09, "lon": lon - 0.10, "color": _sev_color(s.flood_sev),
@@ -608,7 +608,7 @@ def render_basin_snapshot(s, height=243):
     m('<div class="hs-map__legend" style="position:static;margin-top:8px;">'
       '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--safe)"></span>Safe</span>'
       '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--watch)"></span>Watch</span>'
-      '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--warning)"></span>Warning</span>'
+      '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--warning)"></span>Elevated</span>'
       '<span class="hs-leg"><span class="hs-leg__sw" style="background:var(--critical)"></span>Critical</span>'
       '</div>'
       '<div class="hs-cap" style="margin-top:4px;">Marker colour is the live severity '
@@ -982,6 +982,18 @@ def _mins(minutes):
     return f"{int(round(minutes))} min"
 
 
+def _ordinal_suffix(n: int) -> str:
+    """English ordinal suffix: 1st, 2nd, 3rd, 4th, 11th, 53rd, 93rd."""
+    if 11 <= (n % 100) <= 13:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+
+
+def _esp_ordinal(value: float) -> str:
+    """A percentile as an ordinal, e.g. 53.3 -> "53rd" (not "53th")."""
+    return f"{value:.0f}{_ordinal_suffix(int(round(value)))}"
+
+
 def _live_val(v, unit="", fmt="{:.1f}"):
     """Format a real reading for the sidebar; '—' when missing/NaN."""
     try:
@@ -1045,7 +1057,7 @@ with st.sidebar:
         m(f'<div class="hs-cap" style="margin:-6px 0 4px;">{H.SCENARIOS[ss.scenario]["desc"]}</div>')
 
         m('<div class="hs-rail-h">Playback</div>')
-        st.checkbox("Live simulation", key="live", on_change=_on_live_change)
+        st.checkbox("▶ Play simulation", key="live", on_change=_on_live_change)
         st.slider("Seconds per step", 1, 5, key="interval", on_change=_on_interval_change)
         c_step, c_restart = st.columns(2)
         with c_step:
@@ -1055,7 +1067,7 @@ with st.sidebar:
             st.button("Restart ↻", on_click=_on_restart, width="stretch")
 
         if ss.live:
-            m('<span class="hs-live"><span class="hs-live__dot"></span>Live simulation</span>')
+            m('<span class="hs-live"><span class="hs-live__dot"></span>Playing simulation</span>')
         else:
             _done = ss.tick >= H.TICKS_MAX
             m(f'<span class="hs-badge hs-badge--watch"><span class="hs-dot"></span>'
@@ -1236,6 +1248,19 @@ def render_header(s, obs=None):
         when = (s.base_time.strftime("%H:%M:%S") if getattr(s, "base_time", None)
                 else "—")
         prov = obs.source if obs else "—"
+        # FIX (P1): a stale-but-ok reading used to be labelled simply "Live".
+        # Show its age so nobody mistakes a cached reading for a fresh one.
+        _stale_age = ""
+        if ok and getattr(obs, "stale", False):
+            _fetched = getattr(obs, "fetched_at", None)
+            if _fetched is not None:
+                try:
+                    _age_min = max(0, int((datetime.now() - _fetched).total_seconds() // 60))
+                    _stale_age = f" · cached, {_age_min} min old"
+                except Exception:
+                    _stale_age = " · cached reading"
+            else:
+                _stale_age = " · cached reading"
         if ok:
             pill = ('<span class="hs-live"><span class="hs-live__dot"></span>'
                     f'Live &nbsp;·&nbsp; {when}</span>')
@@ -1246,7 +1271,7 @@ def render_header(s, obs=None):
             '<div class="hs-cmd"><div>'
             '<div class="hs-cmd__title">Basin Command Console</div>'
             f'<div class="hs-cmd__sub">Live · <b>{ss.region_name}</b> &nbsp;·&nbsp; '
-            f'updated {when} &nbsp;·&nbsp; real-time feed via {prov}.</div>'
+            f'updated {when}{_stale_age} &nbsp;·&nbsp; real-time feed via {prov}.</div>'
             '</div>'
             + pill +
             '</div>'
@@ -1268,7 +1293,7 @@ def render_header(s, obs=None):
     m(
         '<div class="hs-cmd"><div>'
         '<div class="hs-cmd__title">Basin Command Console</div>'
-        f'<div class="hs-cmd__sub">Scenario: <b>{scen}</b> &nbsp;·&nbsp; '
+        f'<div class="hs-cmd__sub">Demo — scripted 21 Sep 2026 &nbsp;·&nbsp; Scenario: <b>{scen}</b> &nbsp;·&nbsp; '
         f'step {s.tick} of {H.TICKS_MAX} &nbsp;·&nbsp; {prog}% through the event window.</div>'
         '</div>'
         + pill +
@@ -1312,7 +1337,7 @@ def render_overview(s, d, place=None):
         f'</div><div class="hs-hazard__h">{DROUGHT_HEAD[dsev]}</div>'
         f'<div class="hs-hazard__desc">{drought_desc}</div>'
         '<div class="hs-hazard__mini">'
-        f'<div><div class="k">Evaporative stress</div><div class="v">{s.esp:.0f}th %ile</div></div>'
+        f'<div><div class="k">Evaporative stress</div><div class="v">{_esp_ordinal(s.esp)} %ile</div></div>'
         f'<div><div class="k">Warning lead time</div><div class="v">{s.lead_time_days} days</div></div>'
         '</div></div>'
         '</div>'
@@ -1325,15 +1350,18 @@ def render_overview(s, d, place=None):
 
     st.write("")
     m(h2("Performance at a glance", "How the system is doing right now"))
+    m('<div class="hs-cap">In plain words: ESP = how dry the air is vs. the soil, as a percentile. '
+      'KGE = how well the model matches past river data. POD = how often it catches a real drought. '
+      'FIRO = releasing a little water early, before a flood, to make room for it.</div>')
     m(
         '<div class="hs-readouts">'
         + metric("Operational Real-Time Engine Execution", f"{s.real_compute_ms:.2f}", "ms",
                  "Measured this update — deterministic physics")
-        + metric("Model accuracy (KGE)", f"{s.kge:.2f}", "", "Gold-standard hydrology score")
-        + metric("Drought lead time", f"{s.lead_time_days}", "days", "Before visible crop wilting")
-        + metric("Soil-moisture match (R)", f"{s.r_smap:.2f}", "", "Against NASA SMAP satellite")
-        + metric("Drought detection rate", f"{s.pod:.2f}", "POD", "Probability of detection")
-        + metric("Mass balance closure", f'{_mass_balance(s)["resid"]:+.0e}', "acre-ft",
+        + metric("Model accuracy (KGE) — historical, fixed", f"{s.kge:.2f}", "", "Fixed validation score, not measured this update")
+        + metric("Drought lead time — historical, fixed", f"{s.lead_time_days}", "days", "Fixed validation figure, not measured this update")
+        + metric("Soil-moisture match (R) — historical, fixed", f"{s.r_smap:.2f}", "", "Fixed validation score, not measured this update")
+        + metric("Drought detection rate (POD) — historical, fixed", f"{s.pod:.2f}", "POD", "Fixed validation score, not measured this update")
+        + metric("Mass balance closure", ("0" if _mass_balance(s)["resid"] == 0 else f'{_mass_balance(s)["resid"]:+.0e}'), "acre-ft",
                  "Water unaccounted for — re-integrated this update")
         + '</div>'
     )
@@ -1349,7 +1377,7 @@ def render_overview(s, d, place=None):
                      f' &nbsp;{txt}</span></div>')
         m('<div class="hs-panel hs-feed">' + rows + '</div>')
     with col_b:
-        m(h2("Basin snapshot", "Live overview"))
+        m(h2("Basin snapshot", "Live overview" if ss.mode == "live" else "Demo snapshot"))
         render_basin_snapshot(s, height=243)
 
 
@@ -1383,14 +1411,14 @@ def render_farmer(s, d, place=None):
         ))
         render_role_support(s, d, "farmer", place)
         st.write("")
-        m(h2("Message sent to farmers", "Automatic SMS in Marathi and Hindi"))
+        m(h2("Message for farmers", "Draft SMS in Marathi and Hindi — not sent yet"))
         sms = d["sms"]
         m(
             '<div class="hs-sms"><div class="hs-sms__top">📩 SMS advisory</div>'
             '<div class="hs-sms__bubble">'
             f'<div class="hs-sms__mr">{sms["mr"]}</div>'
             f'<div class="hs-sms__en">{sms["en"]}</div>'
-            f'</div><div class="hs-sms__sent">Sent to {sms["sent"]:,} farmers in Marathi and Hindi.</div></div>'
+            f'</div><div class="hs-sms__sent">Draft SMS — not sent yet · {sms["sent"]:,} farmers on the list.</div></div>'
         )
 
     with col_r:
@@ -1405,7 +1433,7 @@ def render_farmer(s, d, place=None):
             fig = go.Figure(go.Indicator(
                 mode="gauge+number+delta",
                 value=s.esp,
-                number={"suffix": "th %ile", "font": {"size": 30, "color": C["brand"]},
+                number={"suffix": f"{_ordinal_suffix(int(round(s.esp)))} %ile", "font": {"size": 30, "color": C["brand"]},
                         "valueformat": ".1f"},
                 delta={"reference": 50.0, "valueformat": "+.1f",
                        "increasing": {"color": C["safe"]},
@@ -1545,7 +1573,7 @@ def render_dam(s, d, place=None):
                 f'<td class="num">{r["level"]}</td></tr>')
         m(
             '<div class="hs-scroll"><table class="hs-table"><thead><tr>'
-            '<th>Time (IST)</th><th>Action</th><th>Release</th><th>Reservoir level</th>'
+            f'<th>Time ({_esc(ss.get("region_tz") or "Asia/Kolkata")})</th><th>Action</th><th>Release</th><th>Reservoir level</th>'
             '</tr></thead><tbody>' + rows_html + '</tbody></table></div>'
         )
 
@@ -1738,6 +1766,8 @@ def render_disaster(s, d, place=None):
         st.write("")
         if not math.isfinite(tto):
             ti_val, ti_unit = "—", ""
+        elif tto <= 1:
+            ti_val, ti_unit = "now", ""
         elif tto < 90:
             ti_val, ti_unit = f"{int(round(tto))}", "min"
         else:
@@ -1753,6 +1783,9 @@ def render_disaster(s, d, place=None):
                      _esc(pl.shelter_short))
             + '</div>'
         )
+        m('<div class="hs-cap" style="margin-top:6px;">1,030 households is the mapped '
+          'low-lying zone for the Pune demo basin — not a live census for other regions. '
+          'Shelter and zone names are indicative — check the district plan.</div>')
 
 
 # ---------------------------------------------------------------------------
@@ -2887,7 +2920,13 @@ def render_dashboard():
                 # rerun fixes it, costs no network (the reading is already in
                 # session state / the module cache), and happens once per visit.
                 _safe_rerun()
-        elif first_load:
+        elif not (obs is not None and obs.ok):
+            # FIX (P0): a feed failure AFTER the first good reading used to fall
+            # through to forcing_from_live(), which invents neutral values
+            # (rain 0.6, soil 0.28, ET0 4.0, temp 30.0) and rendered them as if
+            # live. Now any failed live reading shows the unreachable panel
+            # instead — no invented numbers. Stale-but-ok readings (obs.ok True)
+            # still render, with their cached label.
             # Both shades withhold every number; the difference is only which
             # statement is true. See _live_connecting for why a first miss is
             # reported as "connecting" rather than "unreachable".

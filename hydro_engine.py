@@ -738,6 +738,18 @@ def gate_schedule(s: BasinState, base_time: datetime | None = None) -> list:
 SEV_LABEL = {"safe": "Normal", "watch": "Watch", "warning": "Elevated", "critical": "Critical"}
 
 
+def ordinal_suffix(n: int) -> str:
+    """English ordinal suffix for an integer: 1st, 2nd, 3rd, 4th, 11th, 53rd, 93rd."""
+    if 11 <= (n % 100) <= 13:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+
+
+def esp_ordinal(value: float) -> str:
+    """A percentile as an ordinal, e.g. 53.3 -> "53rd" (not "53th")."""
+    return f"{value:.0f}{ordinal_suffix(int(round(value)))}"
+
+
 def _fmt_time(minutes: float) -> str:
     if not math.isfinite(minutes):
         return "not expected"
@@ -769,7 +781,7 @@ def make_directives(s: BasinState, place: "Place | None" = None,
             "severity": s.drought_sev,
             "title": "Start pre-dawn drip irrigation tomorrow",
             "situation": (
-                f"Soil in the {place.agri_belt} is at the {s.esp:.0f}th percentile of "
+                f"Soil in the {place.agri_belt} is at the {esp_ordinal(s.esp)} percentile of "
                 f"evaporative stress and will reach the wilting point in about "
                 f"{s.days_to_wilting:.0f} days. Rapid evaporation is pulling moisture from "
                 f"the root zone faster than the crop can recover on its own."),
@@ -786,7 +798,7 @@ def make_directives(s: BasinState, place: "Place | None" = None,
             "severity": "safe",
             "title": "No irrigation action needed",
             "situation": (
-                f"Root-zone moisture is healthy (evaporative stress at the {s.esp:.0f}th "
+                f"Root-zone moisture is healthy (evaporative stress at the {esp_ordinal(s.esp)} "
                 f"percentile). Continue normal scheduling and re-check tomorrow."),
             "actions": [
                 "Keep to your normal irrigation schedule.",
@@ -1189,7 +1201,7 @@ def detect_patterns(s: BasinState) -> list:
     if s.esp < 50.0 and s.pet > 0:      # cuts mirror simulate()'s drought ladder
         out.append(Pattern(
             "esp_climatology_tail", "Evaporative stress in the dry tail",
-            f"The evaporative stress ratio of {s.esr:.2f} sits at the {s.esp:.0f}th "
+            f"The evaporative stress ratio of {s.esr:.2f} sits at the {esp_ordinal(s.esp)} "
             f"percentile of the basin climatology (mean {ESR_CLIM_MU:.2f}, sd "
             f"{ESR_CLIM_SD:.2f}), drier than {100.0 - s.esp:.0f}% of the historical "
             f"record.",
@@ -1201,7 +1213,7 @@ def detect_patterns(s: BasinState) -> list:
             "compound_flood_drought", "Both hazards elevated in the same state",
             f"The flood severity computed from the inflow peak of "
             f"{s.inflow_peak:.0f} m³/s reads '{s.flood_sev}' while the drought "
-            f"severity computed from the {s.esp:.0f}th-percentile stress reading "
+            f"severity computed from the {esp_ordinal(s.esp)}-percentile stress reading "
             f"reads '{s.drought_sev}' — one basin, both hazards above normal in the "
             f"same computed state.",
             "critical" if "critical" in (s.flood_sev, s.drought_sev) else "warning",
