@@ -114,6 +114,12 @@ CSS = """
 }
 
 /* base ------------------------------------------------------------------- */
+html, body, .stApp{
+  max-width:100vw;
+  overflow-x:hidden;
+  -webkit-text-size-adjust:100%;
+}
+*, *::before, *::after{ box-sizing:border-box; }
 .stApp{ background:var(--paper); }
 html, body, [class*="css"], .stApp, .stMarkdown, p, span, div, li, td, th{
   font-family:'IBM Plex Sans','Segoe UI',system-ui,sans-serif;
@@ -125,10 +131,20 @@ a:hover{ text-decoration:underline; }
 .stMarkdown img, .hs-panel img{ max-width:100%; height:auto; }
 
 /* strip default streamlit chrome, keep it functional -------------------- */
-[data-testid="stHeader"]{ background:transparent; box-shadow:none; }
-[data-testid="stToolbar"], #MainMenu, [data-testid="stDecoration"], footer{ display:none; }
-.block-container{ max-width:1320px; margin-inline:auto;
-  padding-top:1.1rem; padding-bottom:3rem; padding-inline:clamp(1rem, 4vw, 3rem); }
+[data-testid="stHeader"]{
+  background:transparent !important;
+  box-shadow:none !important;
+  height:0 !important;
+  overflow:visible !important;
+}
+[data-testid="stToolbar"], #MainMenu, [data-testid="stDecoration"], footer{ display:none !important; }
+.block-container{
+  max-width:1320px;
+  margin-inline:auto;
+  padding-top:1.2rem;
+  padding-bottom:3rem;
+  padding-inline:clamp(1rem, 4vw, 3rem);
+}
 
 /* focus visibility (a11y) ------------------------------------------------ */
 a:focus-visible, button:focus-visible, [tabindex]:focus-visible{
@@ -136,8 +152,117 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible{
 }
 
 /* sidebar : the station rail -------------------------------------------- */
-[data-testid="stSidebar"]{ background:var(--surface); border-right:1px solid var(--line); }
-[data-testid="stSidebar"] .block-container{ padding-top:1rem; padding-inline:1rem; }
+[data-testid="stSidebar"]{
+  background:var(--surface) !important;
+  border-right:1px solid var(--line) !important;
+  z-index:1000000 !important;
+}
+[data-testid="stSidebarHeader"]{
+  padding:8px 14px !important;
+  min-height:44px !important;
+  display:flex !important;
+  align-items:center !important;
+  justify-content:flex-end !important;
+  border-bottom:1px solid var(--line) !important;
+  background:#F7FAFB !important;
+}
+[data-testid="stSidebarCollapseButton"]{
+  display:inline-flex !important;
+  visibility:visible !important;
+  align-items:center !important;
+  justify-content:center !important;
+  gap:6px !important;
+  background:var(--surface) !important;
+  border:1px solid var(--line) !important;
+  border-radius:8px !important;
+  padding:6px 14px !important;
+  color:var(--brand) !important;
+  font-weight:600 !important;
+  font-size:13px !important;
+  min-height:38px !important;
+  cursor:pointer !important;
+  box-shadow:0 1px 3px rgba(18,59,84,.06) !important;
+  transition:all .15s ease !important;
+}
+[data-testid="stSidebarCollapseButton"]:hover{
+  background:#EEF3F5 !important;
+  border-color:var(--teal) !important;
+  color:var(--teal) !important;
+}
+[data-testid="stSidebarCollapseButton"] svg{
+  fill:var(--brand) !important;
+  stroke:var(--brand) !important;
+  width:16px !important;
+  height:16px !important;
+}
+[data-testid="stSidebarCollapseButton"]::after{
+  content:"Close ✕";
+  font-family:'IBM Plex Sans',system-ui,sans-serif;
+  font-size:12.5px;
+  font-weight:600;
+  color:var(--brand) !important;
+  margin-left:4px;
+}
+[data-testid="stSidebar"] .block-container{
+  padding-top:0.75rem !important;
+  padding-inline:1rem !important;
+}
+
+/* Sidebar collapsed trigger - prominent, high-contrast, always reachable */
+[data-testid="collapsedControl"]{
+  display:flex !important;
+  visibility:visible !important;
+  opacity:1 !important;
+  align-items:center !important;
+  justify-content:center !important;
+  position:fixed !important;
+  top:12px !important;
+  left:12px !important;
+  z-index:999999 !important;
+  background:var(--brand) !important;
+  color:#FFFFFF !important;
+  border:1.5px solid rgba(255,255,255,.25) !important;
+  border-radius:999px !important;
+  padding:8px 14px 8px 12px !important;
+  min-height:42px !important;
+  min-width:44px !important;
+  box-shadow:0 4px 14px rgba(18,59,84,.32), 0 1px 3px rgba(0,0,0,.12) !important;
+  cursor:pointer !important;
+  transition:all .2s cubic-bezier(.16,1,.3,1) !important;
+}
+[data-testid="collapsedControl"]:hover,
+[data-testid="collapsedControl"]:focus{
+  background:var(--teal) !important;
+  transform:translateY(-1px) !important;
+  box-shadow:0 6px 18px rgba(14,124,139,.4) !important;
+}
+[data-testid="collapsedControl"] button{
+  color:#FFFFFF !important;
+  background:transparent !important;
+  border:none !important;
+  padding:0 !important;
+  margin:0 !important;
+  display:flex !important;
+  align-items:center !important;
+  gap:6px !important;
+  cursor:pointer !important;
+}
+[data-testid="collapsedControl"] svg{
+  fill:#FFFFFF !important;
+  stroke:#FFFFFF !important;
+  width:18px !important;
+  height:18px !important;
+}
+[data-testid="collapsedControl"]::after{
+  content:"Basin / Menu";
+  font-family:'IBM Plex Sans',system-ui,sans-serif;
+  font-size:13px;
+  font-weight:600;
+  color:#FFFFFF !important;
+  margin-left:6px;
+  letter-spacing:.01em;
+  white-space:nowrap;
+}
 .hs-brand{ padding:2px 2px 14px; border-bottom:1px solid var(--line); margin-bottom:14px; }
 .hs-brand__mark{ display:flex; align-items:center; gap:10px; }
 .hs-brand__logo{
@@ -423,14 +548,48 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible{
 .hs-comp-row .k{ color:var(--muted); }
 .hs-comp-row .v{ font-weight:600; color:var(--ink); text-align:right; }
 
-/* streamlit tabs -> segmented nav --------------------------------------- */
-.stTabs [data-baseweb="tab-list"], .stTabs [role="tablist"]{ gap:4px; border-bottom:1px solid var(--line); }
-.stTabs [data-baseweb="tab"], [data-testid="stTab"]{ height:44px; padding:0 18px; background:transparent;
-  font-size:14px; font-weight:600; color:var(--muted); border-radius:8px 8px 0 0; }
-.stTabs [data-baseweb="tab"]:hover, [data-testid="stTab"]:hover{ color:var(--brand); background:#EEF3F5; }
-.stTabs [aria-selected="true"], [data-testid="stTab"][aria-selected="true"]{ color:var(--brand) !important; }
-.stTabs [data-baseweb="tab-highlight"]{ background:var(--brand); height:2px; }
-.stTabs [data-baseweb="tab-border"]{ background:var(--line); }
+/* streamlit tabs -> swipeable responsive segmented nav ------------------- */
+.stTabs [data-baseweb="tab-list"], .stTabs [role="tablist"]{
+  gap:4px;
+  border-bottom:1px solid var(--line);
+  overflow-x:auto !important;
+  overflow-y:hidden !important;
+  -webkit-overflow-scrolling:touch !important;
+  scrollbar-width:none !important;
+  flex-wrap:nowrap !important;
+  max-width:100% !important;
+  padding-bottom:3px !important;
+}
+.stTabs [data-baseweb="tab-list"]::-webkit-scrollbar,
+.stTabs [role="tablist"]::-webkit-scrollbar{
+  display:none !important;
+}
+.stTabs [data-baseweb="tab"], [data-testid="stTab"]{
+  height:42px;
+  padding:0 14px;
+  background:transparent;
+  font-size:13.5px;
+  font-weight:600;
+  color:var(--muted);
+  border-radius:8px 8px 0 0;
+  white-space:nowrap !important;
+  flex-shrink:0 !important;
+  transition:all .15s ease;
+}
+.stTabs [data-baseweb="tab"]:hover, [data-testid="stTab"]:hover{
+  color:var(--brand);
+  background:#EEF3F5;
+}
+.stTabs [aria-selected="true"], [data-testid="stTab"][aria-selected="true"]{
+  color:var(--brand) !important;
+}
+.stTabs [data-baseweb="tab-highlight"]{
+  background:var(--brand);
+  height:2.5px;
+}
+.stTabs [data-baseweb="tab-border"]{
+  background:var(--line);
+}
 
 /* small caption ---------------------------------------------------------- */
 .hs-cap{ font-size:12px; color:var(--muted); }
@@ -440,7 +599,33 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible{
   display:flex; justify-content:space-between; gap:16px; flex-wrap:wrap;
   font-size:12px; color:var(--muted); }
 
+/* mobile in-page bar ---------------------------------------------------- */
+.hs-mobile-bar{ display:none; }
+.hs-sidebar-mobile-close{ display:none; }
+
+/* expander card ---------------------------------------------------------- */
+[data-testid="stExpander"]{
+  background:var(--surface) !important;
+  border:1px solid var(--line) !important;
+  border-radius:var(--radius) !important;
+  box-shadow:var(--shadow) !important;
+  margin-bottom:12px !important;
+}
+[data-testid="stExpander"] summary{
+  font-size:13.5px !important;
+  font-weight:600 !important;
+  color:var(--brand) !important;
+  padding:10px 14px !important;
+}
+
 /* responsive ------------------------------------------------------------- */
+@media (max-width: 992px){
+  .block-container{
+    padding-top:4.2rem !important;
+    padding-bottom:2.5rem !important;
+    padding-inline:clamp(.75rem, 3vw, 1.5rem) !important;
+  }
+}
 @media (max-width: 900px){
   .hs-dipole{ grid-template-columns:1fr; }
   .hs-readouts{ grid-template-columns:1fr 1fr; }
@@ -451,23 +636,93 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible{
   .hs-crit-grid{ grid-template-columns:1fr; }
   .hs-comp-deck{ grid-template-columns:1fr; }
 }
-@media (max-width: 560px){
-  .hs-readouts{ grid-template-columns:1fr; }
-  .hs-ai-grid{ grid-template-columns:1fr; }
-}
-/* phones: stack Streamlit columns full-width, and let wide tables scroll
-   instead of crushing (real fix for horizontal overflow, not overflow:hidden) */
-@media (max-width: 640px){
-  [data-testid="stHorizontalBlock"]{ flex-wrap:wrap; }
+@media (max-width: 768px){
+  /* mobile sidebar sizing */
+  [data-testid="stSidebar"]{ width:88vw !important; max-width:380px !important; }
+  .hs-sidebar-mobile-close{
+    display:flex; justify-content:flex-end; margin-bottom:8px; padding-bottom:8px;
+    border-bottom:1px dashed var(--line);
+  }
+  .hs-sidebar-close-btn{
+    background:#EEF3F5; border:1px solid var(--line); border-radius:6px;
+    padding:6px 12px; font-size:12px; font-weight:600; color:var(--brand);
+    cursor:pointer; display:inline-flex; align-items:center; gap:5px;
+  }
+  .hs-sidebar-close-btn:hover{ background:var(--brand); color:#fff; }
+
+  /* stack Streamlit columns full-width with clean margins */
+  [data-testid="stHorizontalBlock"]{ flex-wrap:wrap !important; gap:12px !important; }
   [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
   [data-testid="stHorizontalBlock"] > [data-testid="column"]{
-    flex:1 1 100% !important; width:100% !important; min-width:100% !important; }
-  .hs-scroll .hs-table{ min-width:460px; }
-  /* phones: Streamlit hides the sidebar behind the ">" menu button — make
-     that button big and tappable so the sidebar is actually findable */
-  [data-testid="collapsedControl"]{ min-width:44px !important; min-height:44px !important;
-    padding:10px !important; background:var(--surface) !important;
-    border:1px solid var(--line) !important; border-radius:10px !important; }
+    flex:1 1 100% !important; width:100% !important; min-width:100% !important; margin-bottom:8px !important; }
+
+  /* mobile in-page status bar */
+  .hs-mobile-bar{
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    background:var(--surface); border:1px solid var(--line); border-radius:var(--radius);
+    padding:10px 14px; margin-bottom:12px; box-shadow:var(--shadow);
+  }
+  .hs-mobile-bar__info{
+    display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600;
+    color:var(--brand); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  .hs-mobile-bar__dot{ width:8px; height:8px; border-radius:50%; background:var(--safe); flex:0 0 auto; }
+  .hs-mobile-bar__title{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:700; }
+  .hs-mobile-bar__mode{
+    font-size:11px; font-weight:600; color:var(--teal); background:#EAF3F5;
+    padding:2px 7px; border-radius:4px; flex:0 0 auto;
+  }
+  .hs-mobile-bar__btn{
+    background:#EEF3F5; border:1px solid var(--line); border-radius:8px;
+    padding:6px 12px; font-size:12.5px; font-weight:600; color:var(--brand);
+    cursor:pointer; flex:0 0 auto; display:inline-flex; align-items:center; gap:6px;
+    transition:all .15s ease;
+  }
+  .hs-mobile-bar__btn:hover, .hs-mobile-bar__btn:active{
+    background:var(--brand); color:#ffffff; border-color:var(--brand);
+  }
+
+  /* command header */
+  .hs-cmd{ flex-direction:column; align-items:flex-start; gap:8px; margin-bottom:10px; }
+  .hs-cmd__title{ font-size:20px; line-height:1.25; }
+  .hs-cmd__sub{ font-size:12.5px; }
+
+  /* tables: smooth scrolling on touch devices without layout breaks */
+  .hs-scroll{ overflow-x:auto !important; -webkit-overflow-scrolling:touch !important; border-radius:var(--radius); }
+  .hs-scroll .hs-table{ min-width:480px; }
+
+  /* directives */
+  .hs-dir__head, .hs-dir__foot{ flex-direction:column; align-items:flex-start; gap:8px; padding:12px 14px; }
+  .hs-dir__body{ padding:14px 14px 4px; }
+  .hs-dir__actions{ padding-left:18px; }
+
+  /* copilot card */
+  .hs-copilot-card{ padding:14px 14px; }
+  .hs-copilot-head{ flex-direction:column; align-items:flex-start; gap:8px; }
+}
+@media (max-width: 560px){
+  .hs-readouts{ grid-template-columns:1fr; }
+  .hs-ai-grid{ grid-template-columns:1fr; gap:10px; }
+  .hs-ai-stat{ padding:12px 14px; }
+  .hs-ai-stat__val{ font-size:19px; }
+  .hs-metric{ padding:12px 14px; }
+  .hs-metric__value{ font-size:22px; }
+  .hs-hazard{ padding:14px 14px; }
+  .hs-hazard__mini{ gap:12px; }
+  .hs-role-item{ grid-template-columns:1fr; gap:6px; }
+  .hs-role-item__tag{ align-self:flex-start; }
+  .hs-sms{ padding:12px 14px; }
+  .hs-sms__mr{ font-size:13.5px; }
+  .hs-sms__en{ font-size:12px; }
+  .hs-table th, .hs-table td{ padding:8px 10px; font-size:12.5px; }
+  .hs-feed__row{ flex-direction:column; gap:4px; padding:10px 0; }
+  .hs-feed__time{ width:auto; font-size:11.5px; }
+  .stButton > button{ min-height:44px !important; font-size:13.5px !important; }
+}
+@media (max-width: 480px){
+  .block-container{ padding-top:4.2rem !important; padding-bottom:2rem !important; padding-inline:.65rem !important; }
+  .hs-cmd__title{ font-size:19px; }
+  .hs-foot{ flex-direction:column; align-items:flex-start; gap:8px; font-size:11px; }
 }
 @media (prefers-reduced-motion: reduce){
   .hs-live__dot{ animation:none; }
@@ -1117,6 +1372,14 @@ DROUGHT_HEAD = {
 # SIDEBAR — station identity, live state, data sources, legend
 # ============================================================================
 with st.sidebar:
+    m(
+        '<div class="hs-sidebar-mobile-close">'
+        '<button type="button" class="hs-sidebar-close-btn" '
+        'onclick="const b=window.parent.document.querySelector(\'[data-testid=&quot;stSidebarCollapseButton&quot;]\');if(b)b.click();">'
+        '✕ Close'
+        '</button>'
+        '</div>'
+    )
     _brand_html = (
         _brand_loc(ss.region_name) if ss.mode == "live"
         else 'Monitoring<br><b>Upper Bhima Basin</b><br>Pune, Maharashtra'
@@ -3277,6 +3540,22 @@ else:
 # widget and its value reset to 0% (the reservoir "emptied" itself). Rendered
 # always, the value survives the switch. In Demo mode the slider does not
 # change the scripted scenario; it is kept so the Live value is not lost.
+_cur_basin_label = (
+    current_basin().name if ss.mode == "live" else "Upper Bhima Basin (Pune)"
+)
+_mode_label = "Live data" if ss.mode == "live" else "Demo simulation"
+m(
+    '<div class="hs-mobile-bar">'
+    f'<div class="hs-mobile-bar__info"><span class="hs-mobile-bar__dot"></span>'
+    f'<span class="hs-mobile-bar__title">{_esc(_cur_basin_label)}</span>'
+    f'<span class="hs-mobile-bar__mode">{_mode_label}</span></div>'
+    '<button class="hs-mobile-bar__btn" type="button" '
+    'onclick="const b=window.parent.document.querySelector(\'[data-testid=&quot;collapsedControl&quot;] button, [data-testid=&quot;collapsedControl&quot;]\');if(b)b.click();">'
+    '☰ Basins &amp; Feed'
+    '</button>'
+    '</div>'
+)
+
 with st.expander("⚙️  Controls — Live / Demo & dam level", expanded=False):
     # Mode switch: flip between the scripted demo and real, live basin data.
     st.radio(
